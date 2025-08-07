@@ -1,0 +1,1 @@
+shiny::runApp(system.file('home/www/CV_LLM', package='WuKong'), launch.browser = TRUE)

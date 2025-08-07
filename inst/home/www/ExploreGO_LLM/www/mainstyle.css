@@ -1,0 +1,87 @@
+/* 头部Logo样式 */
+.main-header {
+  background-color: #D35400;
+  min-height: 50px;
+}
+.skin-blue .main-header .logo {
+  padding: 0;
+    background-color: #D35400; /* 暖橙色 */
+    color: #FDF2E9;
+    border-bottom: 0 solid transparent;
+    font-size: 20px;
+    font-weight: bold;
+    transition: background-color 0.3s ease;
+}
+
+/* 导航栏样式 */
+.skin-blue .main-header .navbar {
+    background-color: #E67E22; /* 浅橙色 */
+    font-weight: bold;
+    border-bottom: 2px solid #BA4A00;
+}
+
+/* 侧边栏容器 */
+.left-side, .main-sidebar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    padding-top: 60px;
+    min-height: 100%;
+    width: 300px;
+    z-index: 810;
+    -webkit-transition: -webkit-transform .3s ease-in-out,width .3s ease-in-out;
+    -moz-transition: -moz-transform .3s ease-in-out,width .3s ease-in-out;
+    -o-transition: -o-transform .3s ease-in-out,width .3s ease-in-out;
+    transition: transform .3s ease-in-out,width .3s ease-in-out;
+}
+
+/* 侧边栏主体 */
+.skin-blue .main-sidebar {
+    background-color: #8E6C5A; /* 陶土棕 */
+    font-size: 18px;
+    line-height: 1.6;
+    color: #F8F9FA;
+    box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+}
+
+/* 侧边栏菜单 */
+.sidebar-menu {
+    margin-top: 20px;
+}
+
+/* 菜单悬停效果 */
+.sidebar-menu li {
+    transition: all 0.2s ease;
+}
+.sidebar-menu li:hover {
+    background-color: rgba(230, 126, 34, 0.1);
+    border-left: 4px solid #E67E22;
+}
+
+/* 盒子组件 */
+.box.box-solid.box-primary {
+    border: 1px solid #EDBB99;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+/* 盒子头部 */
+.box.box-solid.box-primary>.box-header {
+    color: #fff;
+    background:#666666;
+    background-color: #666666;
+    border-radius: 6px 6px 0 0;
+    padding: 12px 15px;
+}
+
+.skin-blue .sidebar-menu>li.active>a, .skin-blue .sidebar-menu>li:hover>a {
+    color: #fff;
+    background: darkred;
+    border-left-color: #3c8dbc;
+}
+
+/* 图表容器 */
+#barploterrorplot {
+    text-align: center;
+}
+
