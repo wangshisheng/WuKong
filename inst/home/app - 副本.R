@@ -281,7 +281,7 @@ ui <- shinyUI(
             uiOutput("visualizationgallery")
           ),
           tabPanel(
-            "6. WuKongmini",#Workflow Designer
+            "6. Workflow Designer",
             uiOutput("oneclickgallery")
           ),
           well = TRUE,

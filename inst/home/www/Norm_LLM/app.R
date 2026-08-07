@@ -11,6 +11,7 @@ library(DT)
 library(esquisse)
 library(ggsci)
 library(openxlsx)
+library(preprocessCore)
 list_modelsx <- ollamar::list_models()
 ###########
 ######ui.R
@@ -82,7 +83,7 @@ ui <- dashboardPage(
 #user_input {
             border-color: #6495ED; /* Change this to your desired border color */
 }
-          
+
   "))),
       tags$script(HTML("
     $(document).on('shiny:connected', function() {
@@ -437,8 +438,8 @@ server <- function(input, output, session) {
       output$ClusterCorNetplot<-renderPlot({
         missvaldata<<-peaksdataout()
         if(ncol(missvaldata)==1){
-          ggplot() + 
-            annotate("text", x = 4, y = 25, size=6,col="red", label = 'No uploaded data and No plot here.\n Please upload data or click the example data.') + 
+          ggplot() +
+            annotate("text", x = 4, y = 25, size=6,col="red", label = 'No uploaded data and No plot here.\n Please upload data or click the example data.') +
             theme_void()
         }else{
           #if(input$loaddatatype==1){
@@ -455,8 +456,8 @@ server <- function(input, output, session) {
       ClusterCorNetplotout<-reactive({
         normdata<<-peaksdataout()
         if(ncol(normdata)==1){
-          ggplot() + 
-            annotate("text", x = 4, y = 25, size=6,col="red", label = 'No uploaded data and No plot here.\n Please upload data or click the example data.') + 
+          ggplot() +
+            annotate("text", x = 4, y = 25, size=6,col="red", label = 'No uploaded data and No plot here.\n Please upload data or click the example data.') +
             theme_void()
         }else{
           #if(input$loaddatatype==1){
@@ -554,15 +555,15 @@ normdata1
     new_chat <- lapply(chat_history(),function(x){
       if (x$role == "user"){
         paste0(
-          '<div class="user"><div class="message"><strong>User:</strong> ', 
-          convert_to_html(gsub(" Plaese just copy below all codes to give me the R codes and no interpretation:\n\n.*","",x$content)), 
+          '<div class="user"><div class="message"><strong>User:</strong> ',
+          convert_to_html(gsub(" Plaese just copy below all codes to give me the R codes and no interpretation:\n\n.*","",x$content)),
           '</div></div>'
         )
       }else{
         paste0('<div class="assistant"><div class="message"><strong>Assistant:</strong> ', convert_to_html(x$content), '</div></div>')
       }
     })
-    
+
     updateTextInput(session, "user_input", value = "")
     output$chat_output <- renderUI({
       HTML(paste(new_chat, collapse = "\n"))
@@ -586,7 +587,7 @@ normdata1
     } else {
       code_result(NULL)
     }
-    
+
     output$code_output <- renderUI({
       code_resultx<<-code_result()
       #if (!is.null(code_result())) {
@@ -609,7 +610,7 @@ normdata1
         HTML(paste("<pre>", code_result(), "</pre>"))
       }
     })
-    
+
     output$plot_result <- renderPlot({
       if (!is.null(code_result()) && is.ggplot(code_result())) {
         code_result()
@@ -648,8 +649,8 @@ normdata1
         }
       }
     )
-    
+
   })
-  
+
 }
 shinyApp(ui = ui, server = server)

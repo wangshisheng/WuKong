@@ -70,7 +70,7 @@ ui <- dashboardPage(
 #user_input {
             border-color: #6495ED; /* Change this to your desired border color */
 }
-          
+
   "))),
       tags$script(HTML("
     $(document).on('shiny:connected', function() {
@@ -161,9 +161,10 @@ ui <- dashboardPage(
               width =  12,
               solidHeader = TRUE,
               collapsible = FALSE,
-              numericInput("Clusternumber",h5("3.1. Cluster number:"),value=3),
-              numericInput("heightx",h5("3.2. Figure Height:"),600),
-              numericInput("widthx",h5("3.3. Figure Width:"),600),
+              numericInput("Clusternumber",h5("3.1. Max Cluster number:"),value=5),
+              numericInput("Clusterdisplay",h5("3.2. Cluster to display:"),value=3),
+              numericInput("heightx",h5("3.3. Figure Height:"),600),
+              numericInput("widthx",h5("3.4. Figure Width:"),600),
               hr(),
               actionButton("mcsbtn_Barplot","Start",icon("paper-plane"),
                            style="color: #fff; background-color: #337ab7; border-color: #2e6da4")
@@ -180,7 +181,7 @@ ui <- dashboardPage(
               radioButtons(
                 "resultsout",
                 label = NULL,
-                choices = list("4.1. Barplot Visualization" = 1),
+                choices = list("4.1. Visualization" = 1),
                 selected = 1,
                 inline = TRUE
               ),
@@ -340,13 +341,13 @@ server <- function(input, output, session) {
         #DivergingBar_fenzu_num<<-grnum2
         CClusterdata<<-peaksdataout()
         if(ncol(CClusterdata)==1){
-          ggplot() + 
-            annotate("text", x = 4, y = 25, size=6,col="red", label = 'No uploaded data and No plot here.\n Please upload data or click the example data.') + 
+          ggplot() +
+            annotate("text", x = 4, y = 25, size=6,col="red", label = 'No uploaded data and No plot here.\n Please upload data or click the example data.') +
             theme_void()
         }else{
           #if(input$loaddatatype==1){
           #  colorx<<-isolate(input$colorx1)
-          #  
+          #
           #}else{
           #  colorx<<-isolate(input$colorx2)
           #}
@@ -354,12 +355,15 @@ server <- function(input, output, session) {
           library(ConsensusClusterPlus)
           #library(LSD)
           library(pheatmap)
-          dcx<-as.matrix(t(CClusterdata))
+          #dcx<-as.matrix(t(CClusterdata))
+          dcx<-as.matrix(CClusterdata)
+          dcx <- sweep(dcx,1, apply(dcx,1,median))
           #colorpalettex<-colorpalette(c("white","blue"),10)
           rcc<-ConsensusClusterPlus(dcx,maxK=Clusternumberx,reps=10,pItem=0.8,pFeature=1,seed=2024,
                                     title="Consensus clustering",distance="pearson",
                                     clusterAlg="hc",plot=NULL)
-          tk<-Clusternumberx
+          Clusterdisplayx<<-isolate(input$Clusterdisplay)
+          tk<-Clusterdisplayx
           colorList<-rcc[[tk]]$clrs
           pc <- rcc[[tk]]$consensusMatrix
           colnames(pc)<-names(rcc[[tk]]$consensusClass)
@@ -367,13 +371,13 @@ server <- function(input, output, session) {
           hc<-rcc[[tk]]$consensusTree
           pc <- pc[hc$order, ]
           #pc <- rbind(pc, 0)
-          #heatmap(pc, Colv = as.dendrogram(hc), Rowv = NA, 
+          #heatmap(pc, Colv = as.dendrogram(hc), Rowv = NA,
           #        symm = FALSE, scale = "none",
-          #        na.rm = TRUE, mar = c(5,5), labRow = FALSE, labCol = FALSE, 
-          #        main = paste("consensus matrix k=", tk,sep = ""), 
+          #        na.rm = TRUE, mar = c(5,5), labRow = FALSE, labCol = FALSE,
+          #        main = paste("consensus matrix k=", tk,sep = ""),
           #        col = colorpalettex, ColSideCol = colorList[[1]])
           #ct<-rcc[[tk]]$consensusClass
-          #legend("topright", legend = unique(ct), fill = unique(colorList[[1]]), 
+          #legend("topright", legend = unique(ct), fill = unique(colorList[[1]]),
           #       horiz = FALSE,cex=1)
           annotation_col_hca = data.frame(
             Clusters = factor(rcc[[tk]]$consensusClass,levels = 1:tk)
@@ -402,13 +406,13 @@ server <- function(input, output, session) {
         #DivergingBar_fenzu_num<<-grnum2
         CClusterdata<<-peaksdataout()
         if(ncol(CClusterdata)==1){
-          ggplot() + 
-            annotate("text", x = 4, y = 25, size=6,col="red", label = 'No uploaded data and No plot here.\n Please upload data or click the example data.') + 
+          ggplot() +
+            annotate("text", x = 4, y = 25, size=6,col="red", label = 'No uploaded data and No plot here.\n Please upload data or click the example data.') +
             theme_void()
         }else{
           #if(input$loaddatatype==1){
           #  colorx<<-isolate(input$colorx1)
-          #  
+          #
           #}else{
           #  colorx<<-isolate(input$colorx2)
           #}
@@ -416,12 +420,14 @@ server <- function(input, output, session) {
           library(ConsensusClusterPlus)
           #library(LSD)
           library(pheatmap)
-          dcx<-as.matrix(t(CClusterdata))
+          dcx<-as.matrix(CClusterdata)
+          dcx <- sweep(dcx,1, apply(dcx,1,median))
           #colorpalettex<-colorpalette(c("white","blue"),10)
           rcc<-ConsensusClusterPlus(dcx,maxK=Clusternumberx,reps=10,pItem=0.8,pFeature=1,seed=2024,
                                     title="Consensus clustering",distance="pearson",
                                     clusterAlg="hc",plot=NULL)
-          tk<-Clusternumberx
+          Clusterdisplayx<<-isolate(input$Clusterdisplay)
+          tk<-Clusterdisplayx
           colorList<-rcc[[tk]]$clrs
           pc <- rcc[[tk]]$consensusMatrix
           colnames(pc)<-names(rcc[[tk]]$consensusClass)
@@ -429,13 +435,13 @@ server <- function(input, output, session) {
           hc<-rcc[[tk]]$consensusTree
           pc <- pc[hc$order, ]
           #pc <- rbind(pc, 0)
-          #heatmap(pc, Colv = as.dendrogram(hc), Rowv = NA, 
+          #heatmap(pc, Colv = as.dendrogram(hc), Rowv = NA,
           #        symm = FALSE, scale = "none",
-          #        na.rm = TRUE, mar = c(5,5), labRow = FALSE, labCol = FALSE, 
-          #        main = paste("consensus matrix k=", tk,sep = ""), 
+          #        na.rm = TRUE, mar = c(5,5), labRow = FALSE, labCol = FALSE,
+          #        main = paste("consensus matrix k=", tk,sep = ""),
           #        col = colorpalettex, ColSideCol = colorList[[1]])
           #ct<-rcc[[tk]]$consensusClass
-          #legend("topright", legend = unique(ct), fill = unique(colorList[[1]]), 
+          #legend("topright", legend = unique(ct), fill = unique(colorList[[1]]),
           #       horiz = FALSE,cex=1)
           annotation_col_hca = data.frame(
             Clusters = factor(rcc[[tk]]$consensusClass,levels = 1:tk)
@@ -497,11 +503,13 @@ library(grid)
 library(ggplotify)
 library(ConsensusClusterPlus)
 library(pheatmap)
-dcx<-as.matrix(t(CClusterdata))
+dcx<-as.matrix(CClusterdata)
+dcx <- sweep(dcx,1, apply(dcx,1,median))
 #process consensus clustering
-rcc<-ConsensusClusterPlus(dcx,maxK=4,reps=10,pItem=0.8,pFeature=1,seed=2024,
+rcc<-ConsensusClusterPlus(dcx,maxK=5,reps=10,pItem=0.8,pFeature=1,seed=2024,
                           title="Consensus clustering",distance="pearson",
                           clusterAlg="hc",plot=NULL)
+#Cluster to display
 tk<-4
 pc<-rcc[[tk]]$consensusMatrix
 colnames(pc)<-names(rcc[[tk]]$consensusClass)
@@ -538,15 +546,15 @@ as.ggplot(~pheatmap(pc1,scale = "none",color=colorRampPalette(c( "#0073c2","whit
     new_chat <- lapply(chat_history(),function(x){
       if (x$role == "user"){
         paste0(
-          '<div class="user"><div class="message"><strong>User:</strong> ', 
-          convert_to_html(gsub(" Plaese just copy below codes to give me the R codes and no interpretation:\n\n.*","",x$content)), 
+          '<div class="user"><div class="message"><strong>User:</strong> ',
+          convert_to_html(gsub(" Plaese just copy below codes to give me the R codes and no interpretation:\n\n.*","",x$content)),
           '</div></div>'
         )
       }else{
         paste0('<div class="assistant"><div class="message"><strong>Assistant:</strong> ', convert_to_html(x$content), '</div></div>')
       }
     })
-    
+
     updateTextInput(session, "user_input", value = "")
     output$chat_output <- renderUI({
       HTML(paste(new_chat, collapse = "\n"))
@@ -570,7 +578,7 @@ as.ggplot(~pheatmap(pc1,scale = "none",color=colorRampPalette(c( "#0073c2","whit
     } else {
       code_result(NULL)
     }
-    
+
     output$code_output <- renderUI({
       code_resultx<<-code_result()
       #if (!is.null(code_result())) {
@@ -593,7 +601,7 @@ as.ggplot(~pheatmap(pc1,scale = "none",color=colorRampPalette(c( "#0073c2","whit
         HTML(paste("<pre>", code_result(), "</pre>"))
       }
     })
-    
+
     output$plot_result <- renderPlot({
       if (!is.null(code_result()) && is.ggplot(code_result())) {
         code_result()
@@ -632,8 +640,8 @@ as.ggplot(~pheatmap(pc1,scale = "none",color=colorRampPalette(c( "#0073c2","whit
         }
       }
     )
-    
+
   })
-  
+
 }
 shinyApp(ui = ui, server = server)
