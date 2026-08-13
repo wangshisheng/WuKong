@@ -4,499 +4,1612 @@ library(shinyjqui)
 library(openxlsx)
 library(gdata)
 library(DT)
-#library(tidyllm)
+# library(tidyllm)
 library(ollamar)
 library(markdown)
 library(shinyAce)
 library(zip)
 library(commonmark)
 library(preprocessCore)
-list_modelsx <- ollamar::list_models()
-load(file = "WKfuncslist1.rdata")
+
+# ===== New libraries for optimized Conversation and WuKongmini =====
+library(shinyjs)
+library(httr2)
+library(jsonlite)
+library(htmltools)
+library(rmarkdown)
+library(knitr)
+
+# ============================================================
+# Global helpers
+# ============================================================
+
+`%||%` <- function(x, y) {
+  if (is.null(x) || length(x) == 0) y else x
+}
+
+safe_filename <- function(x) {
+  x <- gsub("[^a-zA-Z0-9一-龥_\\-]+", "_", x)
+  x <- gsub("_+", "_", x)
+  substr(x, 1, 120)
+}
+
+extract_r_code <- function(text) {
+  if (is.null(text) || !nzchar(text)) return("")
+
+  pattern <- "```(?:r|R)?\\s*([\\s\\S]*?)```"
+  m <- regmatches(text, regexpr(pattern, text, perl = TRUE))
+
+  if (length(m) == 0 || identical(m, character(0)) || m == "") {
+    return(trimws(text))
+  }
+
+  code <- sub("^```(?:r|R)?\\s*", "", m, perl = TRUE)
+  code <- sub("```$", "", code, perl = TRUE)
+  trimws(code)
+}
+
+is_ggplot_object <- function(x) {
+  inherits(x, "ggplot")
+}
+
+is_pheatmap_object <- function(x) {
+  inherits(x, "pheatmap")
+}
+
+summarize_result_object <- function(obj, max_rows = 8, max_cols = 8) {
+  if (inherits(obj, "oneclick_error")) {
+    return(paste0("ERROR: ", obj$message))
+  }
+
+  if (is.data.frame(obj) || is.matrix(obj)) {
+    df <- as.data.frame(obj)
+    nr <- nrow(df)
+    nc <- ncol(df)
+
+    if (nr == 0 || nc == 0) {
+      return(paste0("Object type: table/data.frame; dimensions: ", nr, " x ", nc))
+    }
+
+    df_small <- df[
+      seq_len(min(nr, max_rows)),
+      seq_len(min(nc, max_cols)),
+      drop = FALSE
+    ]
+
+    return(paste(
+      paste0("Object type: table/data.frame; dimensions: ", nr, " x ", nc),
+      paste(capture.output(print(df_small)), collapse = "\n"),
+      sep = "\n"
+    ))
+  }
+
+  if (is_ggplot_object(obj)) {
+    return("Object type: ggplot figure. A plot was generated successfully.")
+  }
+
+  if (is_pheatmap_object(obj)) {
+    return("Object type: pheatmap figure. A heatmap was generated successfully.")
+  }
+
+  if (inherits(obj, "recordedplot")) {
+    return("Object type: recordedplot figure. A base R plot was generated successfully.")
+  }
+
+  if (is.character(obj) || is.numeric(obj) || is.logical(obj)) {
+    return(paste(capture.output(print(obj)), collapse = "\n"))
+  }
+
+  if (is.list(obj)) {
+    return(paste(capture.output(str(obj, max.level = 2)), collapse = "\n"))
+  }
+
+  paste(capture.output(print(obj)), collapse = "\n")
+}
+
+# ============================================================
+# LLM model registry and callers:
+# DeepSeek API, Moonshot/Kimi API, OpenAI Responses API, Local Ollama
+# ============================================================
+
+llm_model_registry <- data.frame(
+  provider = c(
+    rep("deepseek", 2),
+    rep("kimi", 3),
+    rep("openai", 4),
+    rep("ollama", 4)
+  ),
+  provider_label = c(
+    rep("DeepSeek API", 2),
+    rep("Kimi / Moonshot API", 3),
+    rep("OpenAI / ChatGPT API", 4),
+    rep("Local Ollama", 4)
+  ),
+  model = c(
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+
+    "kimi-k3",
+    "kimi-k2-0905-preview",
+    "kimi-latest",
+
+    "gpt-5.6-luna",
+    "gpt-5.6",
+    "gpt-5.5",
+    "gpt-4.1",
+
+    "qwen3.6:35b",
+    "gemma3:27b",
+    "llama3.3:70b",
+    "qwen2.5:72b"
+  ),
+  label = c(
+    "DeepSeek V4 Pro",
+    "DeepSeek V4 Flash",
+
+    "Kimi K3",
+    "Kimi K2 0905 Preview",
+    "Kimi Latest",
+
+    "GPT-5.6 Luna",
+    "GPT-5.6",
+    "GPT-5.5",
+    "GPT-4.1",
+
+    "Qwen 3.6 35B",
+    "Gemma 3 27B",
+    "Llama 3.3 70B",
+    "Qwen 2.5 72B"
+  ),
+  max_context = c(
+    128000,
+    128000,
+
+    128000,
+    128000,
+    128000,
+
+    256000,
+    256000,
+    256000,
+    128000,
+
+    131072,
+    131072,
+    131072,
+    131072
+  ),
+  default_num_predict = c(
+    8192,
+    8192,
+
+    8192,
+    8192,
+    8192,
+
+    16384,
+    16384,
+    16384,
+    8192,
+
+    8192,
+    8192,
+    8192,
+    8192
+  ),
+  stringsAsFactors = FALSE
+)
+
+get_provider_models <- function(provider) {
+  llm_model_registry[llm_model_registry$provider == provider, , drop = FALSE]
+}
+
+get_model_info <- function(provider, model) {
+  df <- llm_model_registry[
+    llm_model_registry$provider == provider &
+      llm_model_registry$model == model,
+    ,
+    drop = FALSE
+  ]
+
+  if (nrow(df) == 0) {
+    provider_label <- switch(
+      provider,
+      deepseek = "DeepSeek API",
+      kimi = "Kimi / Moonshot API",
+      openai = "OpenAI / ChatGPT API",
+      ollama = "Local Ollama",
+      provider
+    )
+
+    df <- data.frame(
+      provider = provider,
+      provider_label = provider_label,
+      model = model,
+      label = paste0(model, " (custom)"),
+      max_context = ifelse(provider == "openai", 128000, 131072),
+      default_num_predict = 8192,
+      stringsAsFactors = FALSE
+    )
+  }
+
+  df[1, , drop = FALSE]
+}
+
+get_model_max_context <- function(provider, model) {
+  info <- get_model_info(provider, model)
+  as.integer(info$max_context[1] %||% 128000)
+}
+
+get_model_default_num_predict <- function(provider, model) {
+  info <- get_model_info(provider, model)
+  as.integer(info$default_num_predict[1] %||% 8192)
+}
+
+default_ollama_models <- get_provider_models("ollama")$model
+deepseek_models <- get_provider_models("deepseek")$model
+kimi_models <- get_provider_models("kimi")$model
+openai_models <- get_provider_models("openai")$model
+
+# Keep the original object name for compatibility with existing code
+list_modelsx <- default_ollama_models
+
+# ============================================================
+# Ollama helpers
+# ============================================================
+
+get_ollama_selected_model <- function(
+    ollama_model_mode = "registered",
+    ollama_model = "qwen3.6:35b",
+    ollama_custom_model = ""
+) {
+  if (identical(ollama_model_mode, "custom")) {
+    custom_model <- trimws(ollama_custom_model %||% "")
+
+    if (!nzchar(custom_model)) {
+      stop(
+        paste(
+          "Custom Ollama model name is empty.",
+          "Please input a valid local Ollama model name,",
+          "such as qwen2.5:32b, llama3.1:8b, or deepseek-r1:70b."
+        )
+      )
+    }
+
+    return(custom_model)
+  }
+
+  ollama_model %||% "qwen3.6:35b"
+}
+
+get_local_ollama_models <- function() {
+  res <- tryCatch({
+    resp <- request("http://localhost:11434/api/tags") |>
+      req_timeout(10) |>
+      req_perform()
+
+    obj <- resp_body_json(resp, simplifyVector = FALSE)
+
+    if (!is.null(obj$models) && length(obj$models) > 0) {
+      models <- vapply(
+        obj$models,
+        function(x) x$name %||% "",
+        character(1)
+      )
+
+      models <- models[nzchar(models)]
+      unique(models)
+    } else {
+      character()
+    }
+  }, error = function(e) {
+    character()
+  })
+
+  res
+}
+
+get_ollama_model_choices <- function() {
+  registered <- get_provider_models("ollama")$model
+  local_models <- get_local_ollama_models()
+  all_models <- unique(c(registered, local_models))
+
+  if (length(all_models) == 0) {
+    all_models <- registered
+  }
+
+  setNames(all_models, all_models)
+}
+
+messages_to_openai_input <- function(messages) {
+  if (is.null(messages) || length(messages) == 0) {
+    return("")
+  }
+
+  paste(
+    vapply(messages, function(m) {
+      role <- m$role %||% "user"
+      content <- m$content %||% ""
+      paste0(toupper(role), ":\n", content)
+    }, character(1)),
+    collapse = "\n\n"
+  )
+}
+
+extract_openai_responses_text <- function(obj) {
+  if (!is.null(obj$output_text)) {
+    return(obj$output_text %||% "")
+  }
+
+  if (!is.null(obj$output) && length(obj$output) > 0) {
+    txt <- c()
+
+    for (item in obj$output) {
+      if (!is.null(item$content) && length(item$content) > 0) {
+        for (cc in item$content) {
+          if (!is.null(cc$text)) {
+            txt <- c(txt, cc$text)
+          }
+        }
+      }
+    }
+
+    if (length(txt) > 0) {
+      return(paste(txt, collapse = "\n"))
+    }
+  }
+
+  ""
+}
+
+# ============================================================
+# LLM callers
+# ============================================================
+
+call_ollama <- function(
+    model,
+    messages,
+    temperature = 0.2,
+    num_predict = NULL,
+    num_ctx = NULL
+) {
+  max_ctx <- get_model_max_context("ollama", model)
+
+  if (is.null(num_ctx) || is.na(num_ctx)) {
+    num_ctx <- max_ctx
+  }
+
+  if (is.null(num_predict) || is.na(num_predict)) {
+    num_predict <- get_model_default_num_predict("ollama", model)
+  }
+
+  req_body <- list(
+    model = model,
+    messages = messages,
+    stream = FALSE,
+    options = list(
+      temperature = temperature,
+      num_predict = num_predict,
+      num_ctx = num_ctx
+    )
+  )
+
+  resp <- request("http://localhost:11434/api/chat") |>
+    req_body_json(req_body, auto_unbox = TRUE) |>
+    req_timeout(900) |>
+    req_perform()
+
+  obj <- resp_body_json(resp, simplifyVector = FALSE)
+  obj$message$content %||% ""
+}
+
+call_deepseek <- function(
+    api_key,
+    model,
+    messages,
+    temperature = 0.2,
+    reasoning_effort = "high",
+    thinking_enabled = TRUE
+) {
+  if (is.null(api_key) || trimws(api_key) == "") {
+    stop("DeepSeek API Key 为空。请填写 API Key 或设置环境变量 DEEPSEEK_API_KEY。")
+  }
+
+  req_body <- list(
+    model = model,
+    messages = messages,
+    stream = FALSE,
+    temperature = temperature
+  )
+
+  if (!is.null(reasoning_effort) && nzchar(reasoning_effort)) {
+    req_body$reasoning_effort <- reasoning_effort
+  }
+
+  if (isTRUE(thinking_enabled)) {
+    req_body$extra_body <- list(
+      thinking = list(type = "enabled")
+    )
+  }
+
+  resp <- request("https://api.deepseek.com/chat/completions") |>
+    req_headers(
+      Authorization = paste("Bearer", api_key),
+      `Content-Type` = "application/json"
+    ) |>
+    req_body_json(req_body, auto_unbox = TRUE) |>
+    req_timeout(900) |>
+    req_perform()
+
+  obj <- resp_body_json(resp, simplifyVector = FALSE)
+  obj$choices[[1]]$message$content %||% ""
+}
+
+call_kimi <- function(
+    api_key,
+    model,
+    messages,
+    temperature = 0.2
+) {
+  if (is.null(api_key) || trimws(api_key) == "") {
+    stop("Moonshot / Kimi API Key 为空。请填写 API Key 或设置环境变量 MOONSHOT_API_KEY。")
+  }
+
+  has_system <- any(
+    vapply(messages, function(m) identical(m$role, "system"), logical(1))
+  )
+
+  if (!has_system) {
+    messages <- c(
+      list(
+        list(
+          role = "system",
+          content = "你是 Kimi，由 Moonshot AI 提供的人工智能助手。你擅长中英文科研写作、生物信息学分析、R 编程和严谨的数据解释。请提供安全、有帮助、准确的回答。"
+        )
+      ),
+      messages
+    )
+  }
+
+  req_body <- list(
+    model = model,
+    messages = messages,
+    stream = FALSE,
+    temperature = temperature
+  )
+
+  resp <- request("https://api.moonshot.cn/v1/chat/completions") |>
+    req_headers(
+      Authorization = paste("Bearer", api_key),
+      `Content-Type` = "application/json"
+    ) |>
+    req_body_json(req_body, auto_unbox = TRUE) |>
+    req_timeout(900) |>
+    req_perform()
+
+  obj <- resp_body_json(resp, simplifyVector = FALSE)
+  obj$choices[[1]]$message$content %||% ""
+}
+
+call_openai <- function(
+    api_key,
+    model,
+    messages,
+    temperature = 0.2,
+    max_output_tokens = NULL
+) {
+  if (is.null(api_key) || trimws(api_key) == "") {
+    stop("OpenAI API Key 为空。请填写 API Key 或设置环境变量 OPENAI_API_KEY。")
+  }
+
+  if (is.null(max_output_tokens) || is.na(max_output_tokens)) {
+    max_output_tokens <- get_model_default_num_predict("openai", model)
+  }
+
+  input_text <- messages_to_openai_input(messages)
+
+  req_body <- list(
+    model = model,
+    input = input_text,
+    temperature = temperature,
+    max_output_tokens = max_output_tokens
+  )
+
+  resp <- request("https://api.openai.com/v1/responses") |>
+    req_headers(
+      Authorization = paste("Bearer", api_key),
+      `Content-Type` = "application/json"
+    ) |>
+    req_body_json(req_body, auto_unbox = TRUE) |>
+    req_timeout(900) |>
+    req_perform()
+
+  obj <- resp_body_json(resp, simplifyVector = FALSE)
+  extract_openai_responses_text(obj)
+}
+
+call_llm <- function(
+    backend = c("deepseek", "kimi", "openai", "ollama"),
+    messages,
+    deepseek_api_key = "",
+    deepseek_model = "deepseek-v4-pro",
+    kimi_api_key = "",
+    kimi_model = "kimi-k3",
+    openai_api_key = "",
+    openai_model = "gpt-5.6-luna",
+    ollama_model = "qwen3.6:35b",
+    temperature = 0.2,
+    num_predict = NULL,
+    num_ctx = NULL,
+    reasoning_effort = "high",
+    thinking_enabled = TRUE
+) {
+  backend <- match.arg(backend)
+
+  if (backend == "deepseek") {
+    call_deepseek(
+      api_key = deepseek_api_key,
+      model = deepseek_model,
+      messages = messages,
+      temperature = temperature,
+      reasoning_effort = reasoning_effort,
+      thinking_enabled = thinking_enabled
+    )
+  } else if (backend == "kimi") {
+    call_kimi(
+      api_key = kimi_api_key,
+      model = kimi_model,
+      messages = messages,
+      temperature = temperature
+    )
+  } else if (backend == "openai") {
+    call_openai(
+      api_key = openai_api_key,
+      model = openai_model,
+      messages = messages,
+      temperature = temperature,
+      max_output_tokens = num_predict
+    )
+  } else {
+    call_ollama(
+      model = ollama_model,
+      messages = messages,
+      temperature = temperature,
+      num_predict = num_predict,
+      num_ctx = num_ctx
+    )
+  }
+}
+
+# ============================================================
+# LLM connection test helper
+# ============================================================
+
+get_selected_model_name <- function(
+    backend,
+    deepseek_model = "deepseek-v4-pro",
+    kimi_model = "kimi-k3",
+    openai_model = "gpt-5.6-luna",
+    ollama_model = "qwen3.6:35b",
+    ollama_model_mode = "registered",
+    ollama_custom_model = ""
+) {
+  if (backend == "deepseek") {
+    return(deepseek_model)
+  }
+
+  if (backend == "kimi") {
+    return(kimi_model)
+  }
+
+  if (backend == "openai") {
+    return(openai_model)
+  }
+
+  get_ollama_selected_model(
+    ollama_model_mode = ollama_model_mode,
+    ollama_model = ollama_model,
+    ollama_custom_model = ollama_custom_model
+  )
+}
+
+get_backend_label <- function(backend) {
+  switch(
+    backend,
+    deepseek = "DeepSeek API",
+    kimi = "Kimi / Moonshot API",
+    openai = "OpenAI / ChatGPT API",
+    ollama = "Local Ollama",
+    backend
+  )
+}
+
+test_llm_connection <- function(
+    backend = c("deepseek", "kimi", "openai", "ollama"),
+    deepseek_api_key = "",
+    deepseek_model = "deepseek-v4-pro",
+    kimi_api_key = "",
+    kimi_model = "kimi-k3",
+    openai_api_key = "",
+    openai_model = "gpt-5.6-luna",
+    ollama_model = "qwen3.6:35b",
+    ollama_model_mode = "registered",
+    ollama_custom_model = "",
+    temperature = 0
+) {
+  backend <- match.arg(backend)
+
+  selected_model <- get_selected_model_name(
+    backend = backend,
+    deepseek_model = deepseek_model,
+    kimi_model = kimi_model,
+    openai_model = openai_model,
+    ollama_model = ollama_model,
+    ollama_model_mode = ollama_model_mode,
+    ollama_custom_model = ollama_custom_model
+  )
+
+  max_ctx <- get_model_max_context(backend, selected_model)
+  default_num_predict <- min(512, get_model_default_num_predict(backend, selected_model))
+
+  test_messages <- list(
+    list(
+      role = "system",
+      content = "You are a concise connection-test assistant."
+    ),
+    list(
+      role = "user",
+      content = paste0(
+        "Please reply only with: WuKong AI connection OK. ",
+        "Model name: ",
+        selected_model,
+        "."
+      )
+    )
+  )
+
+  start_time <- Sys.time()
+
+  res <- tryCatch({
+    txt <- call_llm(
+      backend = backend,
+      messages = test_messages,
+      deepseek_api_key = deepseek_api_key,
+      deepseek_model = deepseek_model,
+      kimi_api_key = kimi_api_key,
+      kimi_model = kimi_model,
+      openai_api_key = openai_api_key,
+      openai_model = openai_model,
+      ollama_model = selected_model,
+      temperature = temperature,
+      num_predict = default_num_predict,
+      num_ctx = max_ctx,
+      reasoning_effort = "high",
+      thinking_enabled = TRUE
+    )
+
+    elapsed <- round(
+      as.numeric(difftime(Sys.time(), start_time, units = "secs")),
+      2
+    )
+
+    list(
+      ok = TRUE,
+      backend = backend,
+      backend_label = get_backend_label(backend),
+      model = selected_model,
+      max_context = max_ctx,
+      elapsed = elapsed,
+      message = txt
+    )
+  }, error = function(e) {
+    elapsed <- round(
+      as.numeric(difftime(Sys.time(), start_time, units = "secs")),
+      2
+    )
+
+    list(
+      ok = FALSE,
+      backend = backend,
+      backend_label = get_backend_label(backend),
+      model = selected_model,
+      max_context = max_ctx,
+      elapsed = elapsed,
+      message = e$message
+    )
+  })
+
+  res
+}
+
+show_llm_test_modal <- function(test_res) {
+  if (isTRUE(test_res$ok)) {
+    showModal(
+      modalDialog(
+        title = div(
+          style = "color:#1F4E5F;font-weight:700;",
+          icon("circle-check"),
+          " AI Model Connection Successful"
+        ),
+        div(
+          style = "font-size:15px;line-height:1.8;",
+          tags$p(tags$b("Backend: "), test_res$backend_label %||% test_res$backend),
+          tags$p(tags$b("Model: "), test_res$model),
+          tags$p(tags$b("Default max context: "), paste0(test_res$max_context, " tokens")),
+          tags$p(tags$b("Elapsed time: "), paste0(test_res$elapsed, " seconds")),
+          tags$p(tags$b("Model response:")),
+          tags$pre(
+            style = "
+              background:#F7F5F0;
+              border:1px solid #D8D2C4;
+              border-radius:8px;
+              padding:12px;
+              color:#1F2937;
+              white-space:pre-wrap;
+            ",
+            test_res$message
+          )
+        ),
+        easyClose = TRUE,
+        footer = modalButton("Close")
+      )
+    )
+  } else {
+    showModal(
+      modalDialog(
+        title = div(
+          style = "color:#B55245;font-weight:700;",
+          icon("triangle-exclamation"),
+          " AI Model Connection Failed"
+        ),
+        div(
+          style = "font-size:15px;line-height:1.8;",
+          tags$p(tags$b("Backend: "), test_res$backend_label %||% test_res$backend),
+          tags$p(tags$b("Model: "), test_res$model),
+          tags$p(tags$b("Default max context: "), paste0(test_res$max_context, " tokens")),
+          tags$p(tags$b("Elapsed time: "), paste0(test_res$elapsed, " seconds")),
+          tags$p(tags$b("Error message:")),
+          tags$pre(
+            style = "
+              background:#FFF1F0;
+              border:1px solid #F2B8B5;
+              border-radius:8px;
+              padding:12px;
+              color:#8A1F11;
+              white-space:pre-wrap;
+            ",
+            test_res$message
+          ),
+          tags$hr(),
+          tags$p(
+            style = "color:#6B7280;",
+            "Please check API key, model name, network access, request quota, or local Ollama service status."
+          )
+        ),
+        easyClose = TRUE,
+        footer = modalButton("Close")
+      )
+    )
+  }
+}
+
+# ============================================================
+# Load WuKong internal function list
+# ============================================================
+
+if (file.exists("WKfuncslist1.rdata")) {
+  load(file = "WKfuncslist1.rdata")
+} else {
+  WKfuncslist1 <- list()
+  warning("WKfuncslist1.rdata not found. WuKongmini will need this object to generate module workflows.")
+}
+
 oneclick_summary_text <- reactiveVal("")
+
+# ============================================================
+# UI helper functions for optimized Conversation and WuKongmini
+# ============================================================
+
+llm_backend_ui <- function(
+    prefix,
+    ollama_select_id,
+    deepseek_key_id,
+    deepseek_model_id,
+    backend_id,
+    kimi_key_id = paste0(prefix, "_kimi_api_key"),
+    kimi_model_id = paste0(prefix, "_kimi_model"),
+    openai_key_id = paste0(prefix, "_openai_api_key"),
+    openai_model_id = paste0(prefix, "_openai_model")
+) {
+  tagList(
+    radioButtons(
+      backend_id,
+      label = NULL,
+      choices = c(
+        "DeepSeek API" = "deepseek",
+        "Kimi / Moonshot API" = "kimi",
+        "OpenAI / ChatGPT API" = "openai",
+        "Local Ollama" = "ollama"
+      ),
+      selected = "deepseek",
+      inline = TRUE
+    ),
+
+    conditionalPanel(
+      condition = sprintf("input.%s == 'deepseek'", backend_id),
+      passwordInput(
+        deepseek_key_id,
+        label = "DeepSeek API Key:",
+        value = Sys.getenv("DEEPSEEK_API_KEY"),
+        width = "100%"
+      ),
+      selectInput(
+        deepseek_model_id,
+        label = "DeepSeek Model:",
+        choices = setNames(
+          get_provider_models("deepseek")$model,
+          get_provider_models("deepseek")$label
+        ),
+        selected = "deepseek-v4-pro",
+        width = "100%"
+      )
+    ),
+
+    conditionalPanel(
+      condition = sprintf("input.%s == 'kimi'", backend_id),
+      passwordInput(
+        kimi_key_id,
+        label = "Moonshot / Kimi API Key:",
+        value = Sys.getenv("MOONSHOT_API_KEY"),
+        width = "100%"
+      ),
+      selectInput(
+        kimi_model_id,
+        label = "Kimi Model:",
+        choices = setNames(
+          get_provider_models("kimi")$model,
+          get_provider_models("kimi")$label
+        ),
+        selected = "kimi-k3",
+        width = "100%"
+      )
+    ),
+
+    conditionalPanel(
+      condition = sprintf("input.%s == 'openai'", backend_id),
+      passwordInput(
+        openai_key_id,
+        label = "OpenAI API Key:",
+        value = Sys.getenv("OPENAI_API_KEY"),
+        width = "100%"
+      ),
+      selectInput(
+        openai_model_id,
+        label = "OpenAI / ChatGPT Model:",
+        choices = setNames(
+          get_provider_models("openai")$model,
+          get_provider_models("openai")$label
+        ),
+        selected = "gpt-5.6-luna",
+        width = "100%"
+      )
+    ),
+
+    conditionalPanel(
+      condition = sprintf("input.%s == 'ollama'", backend_id),
+
+      radioButtons(
+        inputId = paste0(prefix, "_ollama_model_mode"),
+        label = "Ollama Model Source:",
+        choices = c(
+          "Use registered/local model" = "registered",
+          "Use custom model name" = "custom"
+        ),
+        selected = "registered",
+        inline = TRUE
+      ),
+
+      conditionalPanel(
+        condition = sprintf(
+          "input.%s == 'ollama' && input.%s == 'registered'",
+          backend_id,
+          paste0(prefix, "_ollama_model_mode")
+        ),
+        selectInput(
+          ollama_select_id,
+          label = "Registered / Local Ollama Model:",
+          choices = get_ollama_model_choices(),
+          selected = get_provider_models("ollama")$model[1],
+          width = "100%"
+        )
+      ),
+
+      conditionalPanel(
+        condition = sprintf(
+          "input.%s == 'ollama' && input.%s == 'custom'",
+          backend_id,
+          paste0(prefix, "_ollama_model_mode")
+        ),
+        textInput(
+          inputId = paste0(prefix, "_ollama_custom_model"),
+          label = "Custom Ollama Model Name:",
+          value = "",
+          placeholder = "Example: qwen2.5:32b, llama3.1:8b, deepseek-r1:70b",
+          width = "100%"
+        ),
+        helpText(
+          "The model name must match a model already available in your local Ollama service. You can check it with: ollama list"
+        )
+      )
+    )
+  )
+}
 ###########
 ######ui.R
 ###########
+
 ui <- shinyUI(
   fluidPage(
-    style = "min-width:1400px; background: linear-gradient(to bottom, #f9fafb, #e5e7eb); font-family: 'Roboto', sans-serif;", # Light gradient with modern font
+    useShinyjs(),
+
+    style = "min-width:1400px; background: linear-gradient(to bottom, #f9fafb, #e5e7eb); font-family: 'Roboto', sans-serif;",
+
     tagList(
       tags$head(
         tags$link(rel = "stylesheet", type = "text/css", href = "busystyle.css"),
         tags$link(rel = "stylesheet", type = "text/css", href = "mainstyle.css"),
         tags$script(type = "text/javascript", src = "busy.js"),
-        tags$style(type="text/css", "
-                           #loadmessage {
-                     position: fixed;
-                     top: 0px;
-                     left: 0px;
-                     width: 100%;
-                     height:100%;
-                     padding: 250px 0px 5px 0px;
-                     text-align: center;
-                     font-weight: bold;
-                     font-size: 100px;
-                     color: #000000;
-                     background-color: #D6D9E4;
-                     opacity:0.6;
-                     z-index: 105;
-                     }
-                     ")
-      ),#position: fixed;
-      tags$style(HTML("
-      .section-container {
-        border: 1px solid #dfe6e9;
-        border-radius: 8px;
-        background-color: #ffffff;
-        padding: 20px;
-        margin-bottom: 20px;
-        margin-top: 62px;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-      }
-      .input-container {
-    bottom: 0;
-    left: 0;
-    width: 100%;
-    height:210px;
-    margin-top: -10px;
-    background-color: #f9f9f9;
-    border-top: 1px solid #ddd;
-    padding: 10px;
-    box-shadow: 0 -2px 5px rgba(0, 0, 0, 0.1);
-    z-index: 9999;
-    }
-      .section-header {
-        font-size: 20px;
-        font-weight: bold;
-        color: #34495e;
-        margin-bottom: 10px;
-        padding: 10px;
-        border-bottom: 2px solid #dfe6e9;
-      }
-      .btn-primary {
-        background-color: #3498db;
-        color: white;
-        border: none;
-        padding: 10px 0px;
-        border-radius: 5px;
-        cursor: pointer;
-        font-size: 16px;
-        width: 120px;
-      }
-      .btn-primary:hover {
-        background-color: #2980b9;
-      }
-      .btn-danger {
-        background-color: #e74c3c;
-        color: white;
-        border: none;
-        padding: 10px 20px;
-        border-radius: 5px;
-        cursor: pointer;
-        font-size: 16px;
-        width: 120px;
-      }
-      .btn-danger:hover {
-        background-color: #c0392b;
-      }
-      .form-control {
-        width: 100%;
-        padding: 10px;
-        border: 1px solid #ced4da;
-        border-radius: 5px;
-        margin-bottom: 15px;
-      }
-      .chat-container, .result-container {
-      max-height: 550px;
-        height: 500px;
-        overflow-y: auto;
-        padding: 15px;
-        border: 1px solid #dfe6e9;
-        border-radius: 8px;
-        background-color: #f9f9f9;
-        margin-bottom: 10px;
-      }
-      .chat-message {
-        margin-bottom: 15px;
-      }
-      .chat-message.user {
-        text-align: left;
-      }
-      .chat-message.assistant {
-        text-align: left;
-      }
-      .chat-message .message {
-        display: inline-block;
-        padding: 10px 15px;
-        border-radius: 8px;
-        font-size: 14px;
-        line-height: 1.5;
-      }
-      .chat-message.user .message {
-        background-color: #d1ecf1;
-        color: #0c5460;
-      }
-      .chat-message.assistant .message {
-        background-color: #d4edda;
-        color: #155724;
-      }
-      .user, .assistant {
-      margin-bottom: 15px;
-    }
-    .user {
-      text-align: left;
-    }
-    .assistant {
-      text-align: left;
-    }
-    .message {
-      max-width: 70%;
-      padding: 10px;
-      border-radius: 10px;
-      font-size: 16px;
-      line-height: 1.5;
-    }
-    .user .message {
-      background-color: #e0f7fa;
-      margin-left: auto;
-    }
-    .assistant .message {
-      background-color: #f1f8e9;
-    }
-    "))
-    ),
-    tags$script(HTML("
-    $(document).on('shiny:connected', function() {
-      $('#example_link').on('click', function(e) {
-        e.preventDefault();
-        Shiny.setInputValue('example_clicked', true, {priority: 'event'});
-      });
-    });
-  ")),
-    tags$style(HTML("
-                  #datapregallery {
-                    height:900px;
-                    overflow-y:scroll
-                  }
-                  ")),
-    tags$style(HTML("
-                  #analysisgallery {
-                    height:900px;
-                    overflow-y:scroll
-                  }
-                  ")),
-    tags$style(HTML("
-                  #functionalgallery {
-                    height:900px;
-                    overflow-y:scroll
-                  }
-                  ")),
-    tags$style(HTML("
-                  #visualizationgallery {
-                    height:900px;
-                    overflow-y:scroll
-                  }
-                  ")),
-    #div(class = "busy",
-    #    h2(strong("Thinking..."), style = "color: #374151; font-weight: 500;"), # Neutral text color
-    #    img(src = "rmd_loader.gif")
-    #),
-    conditionalPanel(condition="$('html').hasClass('shiny-busy')",id="loadmessage",
-                     tags$div(h2(strong("Thinking...")),img(src="rmd_loader.gif"))),
-    navbarPage(
-      title="",windowTitle="WuKong Platform", fluid = F, position = "fixed-top", id = "navbarid",
-      tabPanel(
-        "Home",
-        uiOutput("welcomeui"),
-        icon = icon("home")
-      ),
-      tabPanel(
-        "Functions",
-        value = "functionspanel",
-        div(style = "margin-top:3px; margin-left:0%; z-index:9999; position:absolute;",
-            img(src = "wukonglogo.png", width = "135px")),
-        navlistPanel(
-          id = "gongnengquanid",
-          tabPanel(
-            "1. Conversation",
-            value = "Conversationpanel",
-            fluidRow(
-              div(
-                class = "section-container",
-                div(class = "section-header", "1.1. Chat contents"),
-                div(class = "chat-container", htmlOutput("chat_output"))
-              ),
-              div(
-                class = "input-container",
-                div(class = "section-header", "1.2. Ask something..."),
-                #selectInput("llmmodel", "Choose a Model:", choices = list_modelsx[[1]]),
-                column(
-                  8,
-                  div(
-                    style = "display: flex; align-items: center; justify-content: space-between;",
-                    # Text area on the left
-                    textAreaInput("user_input", NULL, value = "", width = "100%", height = "120px",
-                                  placeholder = "Type your message here..."),
 
-                  )
+        tags$style(type = "text/css", "
+          #loadmessage {
+            position: fixed;
+            top: 0px;
+            left: 0px;
+            width: 100%;
+            height:100%;
+            padding: 250px 0px 5px 0px;
+            text-align: center;
+            font-weight: bold;
+            font-size: 100px;
+            color: #000000;
+            background-color: #D6D9E4;
+            opacity:0.6;
+            z-index: 105;
+          }
+        ")
+      ),
+
+      tags$style(HTML("
+        .section-container {
+          border: 1px solid #dfe6e9;
+          border-radius: 8px;
+          background-color: #ffffff;
+          padding: 20px;
+          margin-bottom: 20px;
+          margin-top: 62px;
+          box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .input-container {
+          bottom: 0;
+          left: 0;
+          width: 100%;
+          height: 380px;
+          margin-top: -10px;
+          background-color: #f9f9f9;
+          border-top: 1px solid #ddd;
+          padding: 10px;
+          box-shadow: 0 -2px 5px rgba(0, 0, 0, 0.1);
+          z-index: 9999;
+        }
+
+        .section-header {
+          font-size: 20px;
+          font-weight: bold;
+          color: #34495e;
+          margin-bottom: 10px;
+          padding: 10px;
+          border-bottom: 2px solid #dfe6e9;
+        }
+
+        .btn-primary {
+          background-color: #1F4E5F;
+          color: white;
+          border: none;
+          padding: 10px 0px;
+          border-radius: 6px;
+          cursor: pointer;
+          font-size: 16px;
+          width: 120px;
+          transition: all 0.2s ease;
+        }
+
+        .btn-primary:hover {
+          background-color: #173B49;
+          color: #ffffff;
+        }
+
+        .btn-danger {
+          background-color: #e74c3c;
+          color: white;
+          border: none;
+          padding: 10px 20px;
+          border-radius: 5px;
+          cursor: pointer;
+          font-size: 16px;
+          width: 120px;
+        }
+
+        .btn-danger:hover {
+          background-color: #c0392b;
+        }
+
+        .form-control {
+          width: 100%;
+          padding: 10px;
+          border: 1px solid #ced4da;
+          border-radius: 5px;
+          margin-bottom: 15px;
+        }
+
+        .chat-container, .result-container {
+          max-height: 450px;
+          height: 380px;
+          overflow-y: auto;
+          padding: 15px;
+          border: 1px solid #dfe6e9;
+          border-radius: 8px;
+          background-color: #f9f9f9;
+          margin-bottom: 10px;
+        }
+
+        .chat-message {
+          margin-bottom: 15px;
+        }
+
+        .chat-message.user {
+          text-align: left;
+        }
+
+        .chat-message.assistant {
+          text-align: left;
+        }
+
+        .chat-message .message {
+          display: inline-block;
+          padding: 10px 15px;
+          border-radius: 8px;
+          font-size: 14px;
+          line-height: 1.5;
+        }
+
+        .chat-message.user .message {
+          background-color: #d1ecf1;
+          color: #0c5460;
+        }
+
+        .chat-message.assistant .message {
+          background-color: #d4edda;
+          color: #155724;
+        }
+
+        .user, .assistant {
+          margin-bottom: 15px;
+          text-align: left;
+        }
+
+        .message {
+          max-width: 70%;
+          padding: 10px;
+          border-radius: 10px;
+          font-size: 16px;
+          line-height: 1.5;
+          display: inline-block;
+        }
+
+        .user .message {
+          background-color: #E7F0F2;
+          margin-left: auto;
+        }
+
+        .assistant .message {
+          background-color: #F3F0E8;
+        }
+
+        #datapregallery {
+          height: 900px;
+          overflow-y: scroll;
+        }
+
+        #analysisgallery {
+          height: 900px;
+          overflow-y: scroll;
+        }
+
+        #functionalgallery {
+          height: 900px;
+          overflow-y: scroll;
+        }
+
+        #visualizationgallery {
+          height: 900px;
+          overflow-y: scroll;
+        }
+
+        .wukongmini-title-box {
+          background: linear-gradient(135deg, #F7F5F0, #E9EEF0);
+          border-left: 8px solid #1F4E5F;
+          border-radius: 16px;
+          padding: 24px 30px;
+          margin-bottom: 24px;
+          box-shadow: 0 6px 20px rgba(31,78,95,0.13);
+        }
+
+        .wukongmini-title {
+          color: #1F4E5F;
+          font-size: 31px;
+          font-weight: 800;
+          margin-bottom: 8px;
+          letter-spacing: 0.2px;
+        }
+
+        .wukongmini-subtitle {
+          color: #40545A;
+          font-size: 16px;
+          line-height: 1.65;
+        }
+
+        .warm-card {
+          background: #FFFDF8 !important;
+          border: 1px solid #D8D2C4 !important;
+          border-radius: 14px !important;
+          box-shadow: 0 4px 16px rgba(31,78,95,0.10);
+        }
+
+        .warm-section-title {
+          color: #1F4E5F;
+          font-weight: 750;
+          letter-spacing: 0.1px;
+        }
+
+        .module-panel {
+          border-radius: 12px;
+          margin-bottom: 18px;
+          padding: 12px 14px 14px 14px;
+          box-shadow: 0 3px 10px rgba(31,78,95,0.08);
+          border: 1px solid rgba(31,78,95,0.10);
+        }
+
+        .category-header {
+          font-weight: bold;
+          font-size: 17px;
+          margin-bottom: 8px;
+          margin-top: 8px;
+          padding-left: 2px;
+          color: #1F2937;
+        }
+
+        .module-btn {
+          margin: 4px 6px 4px 0;
+          min-width: 180px;
+          text-align: left;
+          border-radius: 7px;
+          border: 1px solid #C9C3B6;
+          background-color: #FFFDF8;
+          color: #263238;
+          transition: background 0.2s, color 0.2s, border 0.2s, box-shadow 0.2s;
+          font-size: 15px;
+        }
+
+        .module-btn.selected {
+          background-color: #1F4E5F !important;
+          color: #FFFFFF !important;
+          font-weight: bold;
+          border: 2px solid #173B49;
+          box-shadow: 0 3px 10px rgba(31,78,95,0.20);
+        }
+
+        .module-btn:hover {
+          background-color: #E7F0F2;
+          color: #1F4E5F;
+          border-color: #1F4E5F;
+        }
+
+        .selected-list-box {
+          min-height: 310px;
+          background: #F7F5F0;
+          border: 1px solid #D8D2C4;
+          border-radius: 12px;
+          padding: 16px 12px 12px 18px;
+          margin-bottom: 10px;
+          color: #263238;
+        }
+
+        .step2-scroll-panel {
+          max-height: 750px;
+          overflow-y: auto;
+          padding-right: 16px;
+        }
+
+        .nature-test-btn {
+          background-color:#B55245 !important;
+          color:white !important;
+          border:none !important;
+          padding:9px 12px !important;
+          border-radius:6px !important;
+          font-size:15px !important;
+          transition:all 0.2s ease;
+        }
+
+        .nature-test-btn:hover {
+          background-color:#923F35 !important;
+          color:white !important;
+        }
+
+        .nature-download-btn {
+          background-color:#7A9E7E !important;
+          color:white !important;
+          border:none !important;
+          padding:10px 12px !important;
+          border-radius:6px !important;
+          font-size:16px !important;
+        }
+
+        .nature-download-btn:hover {
+          background-color:#628468 !important;
+          color:white !important;
+        }
+
+        .oneclick-scroll-box {
+          max-height: 650px;
+          overflow-y: auto;
+          overflow-x: auto;
+          padding-right: 8px;
+        }
+
+        .oneclick-scroll-box::-webkit-scrollbar {
+          width: 8px;
+          height: 8px;
+        }
+
+        .oneclick-scroll-box::-webkit-scrollbar-track {
+          background: #F3F0E8;
+          border-radius: 8px;
+        }
+
+        .oneclick-scroll-box::-webkit-scrollbar-thumb {
+          background: #B8B0A2;
+          border-radius: 8px;
+        }
+
+        .oneclick-scroll-box::-webkit-scrollbar-thumb:hover {
+          background: #8F8678;
+        }
+      ")),
+
+      tags$script(HTML("
+        $(document).on('shiny:connected', function() {
+          $('#example_link').on('click', function(e) {
+            e.preventDefault();
+            Shiny.setInputValue('example_clicked', true, {priority: 'event'});
+          });
+        });
+      ")),
+
+      conditionalPanel(
+        condition = "$('html').hasClass('shiny-busy')",
+        id = "loadmessage",
+        tags$div(h2(strong("Thinking...")), img(src = "rmd_loader.gif"))
+      ),
+
+      navbarPage(
+        title = "",
+        windowTitle = "WuKong Platform",
+        fluid = FALSE,
+        position = "fixed-top",
+        id = "navbarid",
+
+        tabPanel(
+          "Home",
+          uiOutput("welcomeui"),
+          icon = icon("home")
+        ),
+
+        tabPanel(
+          "Functions",
+          value = "functionspanel",
+          div(
+            style = "margin-top:3px; margin-left:0%; z-index:9999; position:absolute;",
+            img(src = "wukonglogo.png", width = "135px")
+          ),
+
+          navlistPanel(
+            id = "gongnengquanid",
+
+            # =====================================================
+            # Replaced Part: 1. Conversation
+            # =====================================================
+            tabPanel(
+              "1. Conversation",
+              value = "Conversationpanel",
+              fluidRow(
+                div(
+                  class = "section-container",
+                  div(class = "section-header", "1.1. Chat contents"),
+                  div(class = "chat-container", htmlOutput("chat_output"))
                 ),
-                column(
-                  4,
-                  div(
-                    style = "margin-top: 0px;margin-left: 0px;",
-                    fluidRow(
-                      tags$label("Choose a Model:", style = "margin-bottom: 0px;")
-                    ),
-                    fluidRow(
-                      selectInput("llmmodel", NULL, choices = list_modelsx[[1]], width = "100%"),
-                    ),
-                    fluidRow(
-                      actionButton("send", "Send", class = "btn-primary")#,
-                      #actionButton("example_link", "Prompt example",
-                      #             style = "color: white; background-color: grey; margin-bottom: 0px;margin-left: 20px;")
+
+                div(
+                  class = "input-container",
+                  div(class = "section-header", "1.2. Ask something..."),
+
+                  column(
+                    8,
+                    div(
+                      style = "display:flex; align-items:center; justify-content:space-between;",
+                      textAreaInput(
+                        "user_input",
+                        NULL,
+                        value = "",
+                        width = "100%",
+                        height = "250px",
+                        placeholder = "Type your message here..."
+                      )
+                    )
+                  ),
+
+                  column(
+                    4,
+                    div(
+                      style = "margin-top:0px; margin-left:0px;",
+                      tags$label(
+                        "LLM Backend Settings:",
+                        style = "margin-bottom:0px; font-weight:bold; color:#1F4E5F;"
+                      ),
+
+                      llm_backend_ui(
+                        prefix = "chat",
+                        ollama_select_id = "llmmodel",
+                        deepseek_key_id = "deepseek_api_key_chat",
+                        deepseek_model_id = "deepseek_model_chat",
+                        backend_id = "chat_llm_backend",
+                        kimi_key_id = "chat_kimi_api_key",
+                        kimi_model_id = "chat_kimi_model",
+                        openai_key_id = "chat_openai_api_key",
+                        openai_model_id = "chat_openai_model"
+                      ),
+
+                      div(
+                        style = "display:flex; gap:10px; align-items:center;",
+                        actionButton("send", "Send", class = "btn-primary"),
+                        actionButton(
+                          "test_ai_connection_chat",
+                          "Test AI Connection",
+                          class = "nature-test-btn",
+                          style = "width:170px;"
+                        )
+                      )
                     )
                   )
                 )
               )
+            ),
+
+            tabPanel(
+              "2. Data Pre-processing",
+              value = "datapregallerypanel",
+              uiOutput("datapregallery")
+            ),
+
+            tabPanel(
+              "3. Statistical Analysis",
+              value = "analysisgallerypanel",
+              uiOutput("analysisgallery")
+            ),
+
+            tabPanel(
+              "4. Functional Annotation Analysis",
+              value = "functionalgallerypanel",
+              uiOutput("functionalgallery")
+            ),
+
+            tabPanel(
+              "5. Data Visualization",
+              value = "visualizationgallerypanel",
+              uiOutput("visualizationgallery")
+            ),
+
+            # =====================================================
+            # Replaced Part: 6. WuKongmini
+            # =====================================================
+            tabPanel(
+              "6. WuKongmini",
+              value = "oneclickpanel",
+              uiOutput("oneclickgallery")
+            ),
+
+            well = TRUE,
+            fluid = FALSE,
+            widths = c(2, 10)
+          ),
+
+          icon = icon("cogs")
+        ),
+
+        tabPanel(
+          "Help",
+          div(
+            style = "margin-top:-57px; margin-left:0%; z-index:9999; position:absolute;",
+            img(src = "wukonglogo.png", width = "135px")
+          ),
+
+          div(
+            style = "margin-top:60px; padding: 20px; background-color: #f9f9f9; border-radius: 10px;",
+            h2(
+              "WuKong Platform Help Center",
+              style = "text-align:center; color: #1d4ed8;"
+            ),
+
+            p(
+              "Welcome to the Help Center! Here, you can find information on how to use the WuKong Platform effectively.",
+              style = "text-align:center; font-size: 16px; color: #4b5563;"
+            ),
+
+            div(
+              style = "margin-top:20px; padding: 20px; background-color: #ffffff; border-radius: 10px; box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.1);",
+              h3("General Overview", style = "color: #2563eb;"),
+              p("WuKong is a powerful platform designed to elevate the way researchers approach proteomics data analysis. It integrates over 72 well-established analysis modules that cover the entire range of data preprocessing, statistical analysis, visualization, functional annotation and workflow designer. On the one hand, these modules retain the classic analysis frameworks, allowing users to adjust parameters within each module to directly generate results tailored to their specific research needs. This flexibility ensures that both beginners and experienced bioinformaticians can efficiently conduct complex analyses without being constrained by rigid workflows. On the other hand, WuKong incorporates large language models (LLMs) to enhance user experience by facilitating conversational interactions with the platform. Researchers can select from a variety of locally installed LLMs or cloud LLM APIs, enabling them to conduct analyses through an intuitive chat interface. This approach not only simplifies the analytical process but also provides real-time guidance and support, making it easier for users to navigate complex datasets and analytical procedures."),
+
+              p("Key features include:"),
+
+              tags$ul(
+                tags$li("Comprehensive Modular Coverage: WuKong integrates over 72 modular tools for data preprocessing, statistical analysis, functional enrichment, visualization, and workflow design, providing a versatile framework for complex proteomics researches."),
+                tags$li("Dual-mode Analytical Interaction: Users can conduct analyses through either conventional GUI-based modules or dynamic, natural language-driven interactions powered by locally deployed or cloud-based LLMs, greatly enhancing accessibility for users with diverse computational backgrounds."),
+                tags$li("Workflow Designer for Flexible Pipelines: The innovative workflow designer enables users to freely select, combine, and execute multiple analysis modules in custom pipelines, overcoming the step-by-step limitations of conventional tools and streamlining complex analyses."),
+                tags$li("Prompt-aware Architecture for Enhanced Interpretability: WuKong’s unique prompt-aware system allows LLMs to reference internal code logic, ensuring that natural language queries yield precise, transparent and reproducible results tailored to user intentions."),
+                tags$li("Scalable LLM Integration: The platform supports multiple LLM backends including DeepSeek, Kimi/Moonshot, OpenAI/ChatGPT, and local Ollama models. This flexibility balances resource efficiency with accuracy, enabling both exploratory tasks and publication-grade analyses.")
+              )
+            ),
+
+            div(
+              style = "margin-top:20px; padding: 20px; background-color: #ffffff; border-radius: 10px; box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.1);",
+              h3("Source codes and user manual", style = "color: #2563eb;"),
+              p(
+                "Source codes can be accessed at our ",
+                tags$a(
+                  href = "https://github.com/wangshisheng/WuKong",
+                  "GitHub Repository",
+                  target = "_blank"
+                ),
+                " and the detailed user manual can be downloaded from ",
+                tags$a(
+                  href = "https://github.com/wangshisheng/WuKong/blob/master/UserManual.pdf",
+                  "User Manual",
+                  target = "_blank"
+                ),
+                "."
+              )
+            ),
+
+            div(
+              style = "margin-top:20px; padding: 20px; background-color: #ffffff; border-radius: 10px; box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.1);",
+              h3("Contact Us", style = "color: #2563eb;"),
+              p(
+                "For further assistance, please contact our support team at ",
+                tags$a(
+                  href = "mailto:shishengwang@wchscu.cn",
+                  "shishengwang@wchscu.cn"
+                ),
+                "."
+              )
             )
           ),
-          tabPanel(
-            "2. Data Pre-processing",
-            value = "datapregallerypanel",
-            uiOutput("datapregallery")
-          ),
-          tabPanel(
-            "3. Statistical Analysis",
-            value = "analysisgallerypanel",
-            uiOutput("analysisgallery")
-          ),
-          tabPanel(
-            "4. Functional Annotation Analysis",
-            value = "functionalgallerypanel",
-            uiOutput("functionalgallery")
-          ),
-          tabPanel(
-            "5. Data Visualization",
-            value = "visualizationgallerypanel",
-            uiOutput("visualizationgallery")
-          ),
-          tabPanel(
-            "6. WuKongmini",#Workflow Designer
-            uiOutput("oneclickgallery")
-          ),
-          well = TRUE,
-          fluid = F,
-          widths = c(2, 10)
-        ),
-        icon = icon("cogs")
-      ),
-      tabPanel(
-        "Help",
-        div(style = "margin-top:-57px; margin-left:0%; z-index:9999; position:absolute;",
-            img(src = "wukonglogo.png", width = "135px")),
-        div(
-          style = "margin-top:60px; padding: 20px; background-color: #f9f9f9; border-radius: 10px;",
-          h2("WuKong Platform Help Center", style = "text-align:center; color: #1d4ed8;"),
-          p("Welcome to the Help Center! Here, you can find information on how to use the WuKong Platform effectively.",
-            style = "text-align:center; font-size: 16px; color: #4b5563;"),
 
-          # General Overview Section
-          div(
-            style = "margin-top:20px; padding: 20px; background-color: #ffffff; border-radius: 10px; box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.1);",
-            h3("General Overview", style = "color: #2563eb;"),
-            p("WuKong is a powerful platform designed to elevate the way researchers approach proteomics data analysis. It integrates over 72 well-established analysis modules that cover the entire range of data preprocessing, statistical analysis, visualization, functional annotation and workflow designer. On the one hand, these modules retain the classic analysis frameworks, allowing users to adjust parameters within each module to directly generate results tailored to their specific research needs. This flexibility ensures that both beginners and experienced bioinformaticians can efficiently conduct complex analyses without being constrained by rigid workflows. On the other hand, WuKong incorporates large language models (LLMs) to enhance user experience by facilitating conversational interactions with the platform. Researchers can select from a variety of locally installed LLMs, enabling them to conduct analyses through an intuitive chat interface. This approach not only simplifies the analytical process but also provides real-time guidance and support, making it easier for users to navigate complex datasets and analytical procedures."),
-            p("Key features include:"),
-            tags$ul(
-              tags$li("Comprehensive Modular Coverage: WuKong integrates over 72 modular tools for data preprocessing, statistical analysis, functional enrichment, visualization, and workflow design, providing a versatile framework for complex proteomics researches."),
-              tags$li("Dual-mode Analytical Interaction: Users can conduct analyses through either conventional GUI-based modules or dynamic, natural language-driven interactions powered by locally deployed LLMs, greatly enhancing accessibility for users with diverse computational backgrounds."),
-              tags$li("Workflow Designer for Flexible Pipelines: The innovative workflow designer enables users to freely select, combine, and execute multiple analysis modules in custom pipelines, overcoming the step-by-step limitations of conventional tools and streamlining complex analyses."),
-              tags$li("Prompt-aware Architecture for Enhanced Interpretability: WuKong’s unique prompt-aware system allows LLMs to reference internal code logic, ensuring that natural language queries yield precise, transparent and reproducible results tailored to user intentions."),
-              tags$li("Scalable LLM Integration: The platform supports multiple local LLM backends via Ollama, ranging from lightweight to large-scale models. This flexibility balances resource efficiency with accuracy, enabling both exploratory tasks and publication-grade analyses.")
-            )
-          ),
-          # Source codes and user manual
-          div(
-            style = "margin-top:20px; padding: 20px; background-color: #ffffff; border-radius: 10px; box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.1);",
-            h3("Source codes and user manual", style = "color: #2563eb;"),
-            p("Source codes can be accessed at our ",
-              tags$a(href = "https://github.com/wangshisheng/WuKong", "GitHub Repository", target = "_blank"),
-              " and the detailed user manual can be downloaded from ",
-              tags$a(href = "https://github.com/wangshisheng/WuKong/blob/master/UserManual.pdf", "User Manual", target = "_blank"), ".")
-          ),
-          # Navigation Section
-          #div(
-          #  style = "margin-top:20px; padding: 20px; background-color: #ffffff; border-radius: 10px; box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.1);",
-          #  h3("Navigation", style = "color: #2563eb;"),
-          #  p("The platform is organized into the following sections:"),
-          #  tags$ul(
-          #    tags$li(tags$b("Home:"), " Provides an introduction to the platform and its features."),
-          #    tags$li(tags$b("Functions:"), " Contains a variety of modules for data analysis, preprocessing, and visualization."),
-          #    tags$li(tags$b("Help:"), " This section provides information on how to use the platform.")
-          #  )
-          #),
-
-          # Using the Platform Section
-          #div(
-          #  style = "margin-top:20px; padding: 20px; background-color: #ffffff; border-radius: 10px; box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.1);",
-          #  h3("How to Use the Platform", style = "color: #2563eb;"),
-          #  p("Follow these steps to get started:"),
-          #  tags$ol(
-          #    tags$li("Navigate to the ", tags$b("Functions"), " tab to explore available modules."),
-          #    tags$li("Select a module that fits your analysis needs."),
-          #    tags$li("Provide the required input data and parameters."),
-          #    tags$li("Click ", tags$b("Start"), " to execute the module."),
-          #    tags$li("View and download the results.")
-          #  )
-          #),
-
-          # Model Descriptions Section
-          #div(
-          #  style = "margin-top:20px; padding: 20px; background-color: #ffffff; border-radius: 10px; box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.1);",
-          #  h3("Model Descriptions", style = "color: #2563eb;"),
-          #  p("Below is a detailed description of each model available in the platform and how to use them:"),
-          #
-          #  # Model 1: Conversation
-          #  div(
-          #    style = "margin-top:10px;",
-          #    h4("1. Conversation", style = "color: #1f2937;"),
-          #    p("The Conversation module allows you to interact with local large language models (LLMs) for various queries and tasks. It supports models such as Llama, Gemma, and others."),
-          #    p("How to use:"),
-          #    tags$ol(
-          #      tags$li("Select a model from the dropdown menu in the 'Conversation' section."),
-          #      tags$li("Type your query or request in the text box."),
-          #      tags$li("Click the ", tags$b("Send"), " button to receive a response.")
-          #    ),
-          #    p("Example use cases:"),
-          #    tags$ul(
-          #      tags$li("Ask for help with data preprocessing."),
-          #      tags$li("Request code snippets for specific analyses."),
-          #      tags$li("Seek guidance on statistical methods.")
-          #    )
-          #  ),
-          #
-          #  # Model 2: Data Preprocessing
-          #  div(
-          #    style = "margin-top:10px;",
-          #    h4("2. Data Preprocessing", style = "color: #1f2937;"),
-          #    p("This module provides tools for cleaning and preparing your data, including normalization, missing value imputation, and coefficient of variation calculation."),
-          #    p("How to use:"),
-          #    tags$ol(
-          #      tags$li("Navigate to the 'Data Preprocessing' tab."),
-          #      tags$li("Select the desired preprocessing task, such as 'Normalization' or 'Missing Value Imputation'."),
-          #      tags$li("Upload your dataset and specify the required parameters."),
-          #      tags$li("Click ", tags$b("Start"), " to process your data.")
-          #    ),
-          #    p("Example tasks:"),
-          #    tags$ul(
-          #      tags$li("Normalize a dataset for downstream analysis."),
-          #      tags$li("Handle missing values in a large dataset."),
-          #      tags$li("Calculate and visualize the coefficient of variation (CV).")
-          #    )
-          #  ),
-          #
-          #  # Model 3: Statistical Analysis
-          #  div(
-          #    style = "margin-top:10px;",
-          #    h4("3. Statistical Analysis", style = "color: #1f2937;"),
-          #    p("Perform advanced statistical analyses such as PCA, clustering, regression, and differential expression analysis."),
-          #    p("How to use:"),
-          #    tags$ol(
-          #      tags$li("Navigate to the 'Statistical Analysis' tab."),
-          #      tags$li("Select the statistical method you want to perform, such as PCA or ANOVA."),
-          #      tags$li("Upload your dataset and configure the analysis settings."),
-          #      tags$li("Click ", tags$b("Start"), " to run the analysis.")
-          #    ),
-          #    p("Example analyses:"),
-          #    tags$ul(
-          #      tags$li("Perform Principal Component Analysis (PCA) to reduce data dimensionality."),
-          #      tags$li("Use clustering methods to group similar data points."),
-          #      tags$li("Conduct ANOVA to identify significant differences between groups.")
-          #    )
-          #  ),
-          #
-          #  # Model 4: Functional Annotation
-          #  div(
-          #    style = "margin-top:10px;",
-          #    h4("4. Functional Annotation", style = "color: #1f2937;"),
-          #    p("Analyze gene and protein functions using tools like GO enrichment and KEGG pathway analysis."),
-          #    p("How to use:"),
-          #    tags$ol(
-          #      tags$li("Navigate to the 'Functional Annotation' tab."),
-          #      tags$li("Select a tool, such as 'GO Enrichment' or 'KEGG Pathway Analysis'."),
-          #      tags$li("Upload your gene or protein list and specify the analysis parameters."),
-          #      tags$li("Click ", tags$b("Start"), " to execute the analysis.")
-          #    ),
-          #    p("Example tasks:"),
-          #    tags$ul(
-          #      tags$li("Identify enriched biological processes using GO analysis."),
-          #      tags$li("Explore pathways associated with a gene list using KEGG enrichment.")
-          #    )
-          #  ),
-          #
-          #  # Model 5: Data Visualization
-          #  div(
-          #    style = "margin-top:10px;",
-          #    h4("5. Data Visualization", style = "color: #1f2937;"),
-          #    p("Create publication-quality visualizations, including bar plots, PCA plots, and heatmaps."),
-          #    p("How to use:"),
-          #    tags$ol(
-          #      tags$li("Navigate to the 'Data Visualization' tab."),
-          #      tags$li("Select a visualization type, such as 'Bar Plot' or 'Heatmap'."),
-          #      tags$li("Upload your data and customize the plot settings."),
-          #      tags$li("Click ", tags$b("Start"), " to generate the plot.")
-          #    ),
-          #    p("Example visualizations:"),
-          #    tags$ul(
-          #      tags$li("Generate a heatmap to visualize data clusters."),
-          #      tags$li("Create a bar plot to compare categorical data."),
-          #      tags$li("Visualize PCA results in a scatter plot.")
-          #    )
-          #  )
-          #),
-          #
-          ## FAQs Section
-          #div(
-          #  style = "margin-top:20px; padding: 20px; background-color: #ffffff; border-radius: 10px; box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.1);",
-          #  h3("Frequently Asked Questions (FAQs)", style = "color: #2563eb;"),
-          #  tags$ul(
-          #    tags$li(tags$b("Q: How do I select a model for the conversation module?"),
-          #            tags$p("A: Use the dropdown menu in the 'Conversation' section to choose a model.")),
-          #    tags$li(tags$b("Q: Can I download the results?"),
-          #            tags$p("A: Yes, you can download results in various formats, including CSV and PDF.")),
-          #    tags$li(tags$b("Q: What should I do if I encounter an error?"),
-          #            tags$p("A: Clear the chat or restart the module. If the issue persists, contact support."))
-          #  )
-          #),
-
-          # Contact Section
-          div(
-            style = "margin-top:20px; padding: 20px; background-color: #ffffff; border-radius: 10px; box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.1);",
-            h3("Contact Us", style = "color: #2563eb;"),
-            p("For further assistance, please contact our support team at ",
-              tags$a(href="mailto:shishengwang@wchscu.cn", "shishengwang@wchscu.cn"), ".")
-          )
-        ),
-        icon = icon("binoculars")
+          icon = icon("binoculars")
+        )
       )
     )
   )
 )
-
 ###########
 ######server.R
 ###########
+
 server <- shinyServer(
   function(input, output, session) {
-    options(shiny.maxRequestSize=100*1024^2)
-    # welcomeui
+    options(shiny.maxRequestSize = 100 * 1024^2)
+
+    session$onSessionEnded(function() {
+      print("Session ended cleanly")
+    })
+
+    # ============================================================
+    # LLM connection tests for optimized Conversation and WuKongmini
+    # ============================================================
+
+    observeEvent(input$test_ai_connection_chat, {
+      showModal(
+        modalDialog(
+          title = div(
+            style = "color:#1F4E5F;font-weight:700;",
+            icon("spinner"),
+            " Testing AI Connection..."
+          ),
+          div(
+            style = "font-size:15px;line-height:1.8;",
+            tags$p("WuKong is testing the selected AI backend and model with its default maximum context setting.")
+          ),
+          footer = NULL,
+          easyClose = FALSE
+        )
+      )
+
+      test_res <- test_llm_connection(
+        backend = input$chat_llm_backend,
+        deepseek_api_key = input$deepseek_api_key_chat,
+        deepseek_model = input$deepseek_model_chat,
+        kimi_api_key = input$chat_kimi_api_key,
+        kimi_model = input$chat_kimi_model,
+        openai_api_key = input$chat_openai_api_key,
+        openai_model = input$chat_openai_model,
+        ollama_model = input$llmmodel,
+        ollama_model_mode = input$chat_ollama_model_mode %||% "registered",
+        ollama_custom_model = input$chat_ollama_custom_model %||% "",
+        temperature = 0
+      )
+
+      removeModal()
+      show_llm_test_modal(test_res)
+    })
+
+    observeEvent(input$test_ai_connection_oneclick, {
+      showModal(
+        modalDialog(
+          title = div(
+            style = "color:#1F4E5F;font-weight:700;",
+            icon("spinner"),
+            " Testing AI Connection..."
+          ),
+          div(
+            style = "font-size:15px;line-height:1.8;",
+            tags$p("WuKongmini is testing the selected AI backend and model with its default maximum context setting.")
+          ),
+          footer = NULL,
+          easyClose = FALSE
+        )
+      )
+
+      test_res <- test_llm_connection(
+        backend = input$oneclick_llm_backend,
+        deepseek_api_key = input$deepseek_api_key_oneclick,
+        deepseek_model = input$deepseek_model_oneclick,
+        kimi_api_key = input$kimi_api_key_oneclick,
+        kimi_model = input$kimi_model_oneclick,
+        openai_api_key = input$openai_api_key_oneclick,
+        openai_model = input$openai_model_oneclick,
+        ollama_model = input$llmmodeloneclick,
+        ollama_model_mode = input$oneclick_ollama_model_mode %||% "registered",
+        ollama_custom_model = input$oneclick_ollama_custom_model %||% "",
+        temperature = 0
+      )
+
+      removeModal()
+      show_llm_test_modal(test_res)
+    })
+
+    # ============================================================
+    # Home page
+    # ============================================================
+
     output$welcomeui <- renderUI({
       fluidRow(
-        # Logo Section
         fluidRow(
-          div(style = "margin-top:3px; margin-left:18%; z-index:9999; position: absolute;",
-              img(src = "wukonglogo.png", width = "135px"))
+          div(
+            style = "margin-top:3px; margin-left:18%; z-index:9999; position: absolute;",
+            img(src = "wukonglogo.png", width = "135px")
+          )
         ),
-        # Welcome Section
+
         div(
           style = "margin-top:60px; background: linear-gradient(to bottom, white,white); color: #111827; height:770px; padding: 30px 15px; border-radius: 10px; box-shadow: 0px 4px 8px rgba(0, 0, 0, 0.1);",
           div(
@@ -513,13 +1626,11 @@ server <- shinyServer(
           )
         ),
 
-        # Section Title
         div(
           style = "margin-top:30px; text-align:center; font-size:240%; font-weight:bold; color:#1d4ed8;",
           HTML("Function Modules")
         ),
 
-        # Function Modules Section
         div(
           id = "moduleup1",
           fluidRow(
@@ -528,31 +1639,32 @@ server <- shinyServer(
               div(
                 style = "text-align:center; margin-top:20px; margin-left:30%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
                 class = "module-box",
-                div(
-                  img(src = 'conversation.png', height = "300px")
-                ),
+                div(img(src = "conversation.png", height = "300px")),
                 div(
                   style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
                   HTML("Conversation")
                 ),
                 div(
                   style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;",
-                  HTML("Chat with local large language models <br />that are deployed locally.")
+                  HTML("Chat with local or cloud large language models <br />that are deployed locally or called by APIs.")
                 ),
                 div(
                   style = "text-align:center; margin-top:15px;",
-                  actionButton("button_module1", "Learn More", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
+                  actionButton(
+                    "button_module1",
+                    "Learn More",
+                    style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;"
+                  )
                 )
               )
             ),
+
             column(
               6,
               div(
                 style = "text-align:center; margin-top:20px; margin-right:30%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
                 class = "module-box",
-                div(
-                  img(src = 'datapreprocess.png', height = "300px")
-                ),
+                div(img(src = "datapreprocess.png", height = "300px")),
                 div(
                   style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
                   HTML("Data Pre-processing")
@@ -563,20 +1675,23 @@ server <- shinyServer(
                 ),
                 div(
                   style = "text-align:center; margin-top:15px;",
-                  actionButton("button_module2", "Learn More", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
+                  actionButton(
+                    "button_module2",
+                    "Learn More",
+                    style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;"
+                  )
                 )
               )
             )
           ),
+
           fluidRow(
             column(
               4,
               div(
                 style = "text-align:center; margin-top:40px; margin-left:10%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
                 class = "module-box",
-                div(
-                  img(src = 'danyuanduoyuan.png', height = "300px")
-                ),
+                div(img(src = "danyuanduoyuan.png", height = "300px")),
                 div(
                   style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
                   HTML("Statistical Analysis")
@@ -587,18 +1702,21 @@ server <- shinyServer(
                 ),
                 div(
                   style = "text-align:center; margin-top:15px;",
-                  actionButton("button_module3", "Learn More", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
+                  actionButton(
+                    "button_module3",
+                    "Learn More",
+                    style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;"
+                  )
                 )
               )
             ),
+
             column(
               4,
               div(
                 style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
                 class = "module-box",
-                div(
-                  img(src = 'gongneng.png', height = "300px")
-                ),
+                div(img(src = "gongneng.png", height = "300px")),
                 div(
                   style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
                   HTML("Functional Analysis")
@@ -609,18 +1727,21 @@ server <- shinyServer(
                 ),
                 div(
                   style = "text-align:center; margin-top:15px;",
-                  actionButton("button_module4", "Learn More", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
+                  actionButton(
+                    "button_module4",
+                    "Learn More",
+                    style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;"
+                  )
                 )
               )
             ),
+
             column(
               4,
               div(
                 style = "text-align:center; margin-top:40px; margin-right:10%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
                 class = "module-box",
-                div(
-                  img(src = 'huatu.png', height = "300px")
-                ),
+                div(img(src = "huatu.png", height = "300px")),
                 div(
                   style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
                   HTML("Data Visualization")
@@ -631,45 +1752,60 @@ server <- shinyServer(
                 ),
                 div(
                   style = "text-align:center; margin-top:15px;",
-                  actionButton("button_module5", "Learn More", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
+                  actionButton(
+                    "button_module5",
+                    "Learn More",
+                    style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;"
+                  )
                 )
               )
             )
           )
         ),
 
-        # Footer Section
         div(
           style = "margin-top:50px; background:#1f2937; height:100px; padding: 30px 15px;",
           div(
             style = "text-align:center; font-size:100%; color:white;",
-            HTML("&copy; 2025 WuKong Platform")#Shisheng Wang, Hao Yang and Chenpin Shen
+            HTML("&copy; 2026 WuKong Platform")
           )
         )
       )
     })
-    ###
+
+    # ============================================================
+    # Home module buttons
+    # ============================================================
+
     observeEvent(input$button_module1, {
-      updateNavbarPage(session, "navbarid",selected = "functionspanel")
+      updateNavbarPage(session, "navbarid", selected = "functionspanel")
       updateNavlistPanel(session, "gongnengquanid", selected = "Conversationpanel")
     })
+
     observeEvent(input$button_module2, {
-      updateNavbarPage(session, "navbarid",selected = "functionspanel")
+      updateNavbarPage(session, "navbarid", selected = "functionspanel")
       updateNavlistPanel(session, "gongnengquanid", selected = "datapregallerypanel")
     })
+
     observeEvent(input$button_module3, {
-      updateNavbarPage(session, "navbarid",selected = "functionspanel")
+      updateNavbarPage(session, "navbarid", selected = "functionspanel")
       updateNavlistPanel(session, "gongnengquanid", selected = "analysisgallerypanel")
     })
+
     observeEvent(input$button_module4, {
-      updateNavbarPage(session, "navbarid",selected = "functionspanel")
+      updateNavbarPage(session, "navbarid", selected = "functionspanel")
       updateNavlistPanel(session, "gongnengquanid", selected = "functionalgallerypanel")
     })
+
     observeEvent(input$button_module5, {
-      updateNavbarPage(session, "navbarid",selected = "functionspanel")
+      updateNavbarPage(session, "navbarid", selected = "functionspanel")
       updateNavlistPanel(session, "gongnengquanid", selected = "visualizationgallerypanel")
     })
-    ##
+
+    # ============================================================
+    # Original Data Pre-processing gallery
+    # ============================================================
+
     output$datapregallery <- renderUI({
       fluidRow(
         style = "margin-top:60px;",
@@ -678,9 +1814,7 @@ server <- shinyServer(
           div(
             style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
             class = "module-box",
-            div(
-              img(src = "CV_LLM.png", width = "200px", height = "200px")
-            ),
+            div(img(src = "CV_LLM.png", width = "200px", height = "200px")),
             div(
               style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
               HTML("Coefficient of variation")
@@ -691,18 +1825,21 @@ server <- shinyServer(
             ),
             div(
               style = "text-align:center; margin-top:15px;",
-              actionButton("btnCV_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
+              actionButton(
+                "btnCV_LLM",
+                "Start",
+                style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;"
+              )
             )
           )
         ),
+
         column(
           4,
           div(
             style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
             class = "module-box",
-            div(
-              img(src = "MissingValue_LLM.png", width = "200px", height = "200px")
-            ),
+            div(img(src = "MissingValue_LLM.png", width = "200px", height = "200px")),
             div(
               style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
               HTML("Missing value imputation")
@@ -713,18 +1850,21 @@ server <- shinyServer(
             ),
             div(
               style = "text-align:center; margin-top:15px;",
-              actionButton("btnMissingValue_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
+              actionButton(
+                "btnMissingValue_LLM",
+                "Start",
+                style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;"
+              )
             )
           )
         ),
+
         column(
           4,
           div(
             style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
             class = "module-box",
-            div(
-              img(src = "Norm_LLM.png", width = "200px", height = "200px")
-            ),
+            div(img(src = "Norm_LLM.png", width = "200px", height = "200px")),
             div(
               style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
               HTML("Normalization")
@@ -735,18 +1875,21 @@ server <- shinyServer(
             ),
             div(
               style = "text-align:center; margin-top:15px;",
-              actionButton("btnNorm_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
+              actionButton(
+                "btnNorm_LLM",
+                "Start",
+                style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;"
+              )
             )
           )
         ),
+
         column(
           4,
           div(
             style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
             class = "module-box",
-            div(
-              img(src = "TableMerge_LLM.png", width = "200px", height = "200px")
-            ),
+            div(img(src = "TableMerge_LLM.png", width = "200px", height = "200px")),
             div(
               style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
               HTML("Two tables merging")
@@ -757,18 +1900,21 @@ server <- shinyServer(
             ),
             div(
               style = "text-align:center; margin-top:15px;",
-              actionButton("btnTableMerge_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
+              actionButton(
+                "btnTableMerge_LLM",
+                "Start",
+                style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;"
+              )
             )
           )
         ),
+
         column(
           4,
           div(
             style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
             class = "module-box",
-            div(
-              img(src = "AnalyzeWebPage_LLM.png", width = "200px", height = "200px")
-            ),
+            div(img(src = "AnalyzeWebPage_LLM.png", width = "200px", height = "200px")),
             div(
               style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
               HTML("Webpage content analysis")
@@ -779,2095 +1925,684 @@ server <- shinyServer(
             ),
             div(
               style = "text-align:center; margin-top:15px;",
-              actionButton("btnAnalyzeWebPage_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
+              actionButton(
+                "btnAnalyzeWebPage_LLM",
+                "Start",
+                style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;"
+              )
             )
           )
         )
       )
     })
-    observeEvent(input$btnAnalyzeWebPage_LLM,{
-      rstudioapi::jobRunScript(system.file('home/btnAnalyzeWebPage_LLM.R', package='WuKong'))
+
+    observeEvent(input$btnAnalyzeWebPage_LLM, {
+      rstudioapi::jobRunScript(system.file("home/btnAnalyzeWebPage_LLM.R", package = "WuKong"))
     })
+
     observeEvent(input$btnCV_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnCV_LLM.R', package='WuKong'))
+      rstudioapi::jobRunScript(system.file("home/btnCV_LLM.R", package = "WuKong"))
     })
+
     observeEvent(input$btnMissingValue_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnMissingValue_LLM.R', package='WuKong'))
+      rstudioapi::jobRunScript(system.file("home/btnMissingValue_LLM.R", package = "WuKong"))
     })
+
     observeEvent(input$btnNorm_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnNorm_LLM.R', package='WuKong'))
+      rstudioapi::jobRunScript(system.file("home/btnNorm_LLM.R", package = "WuKong"))
     })
+
     observeEvent(input$btnTableMerge_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnTableMerge_LLM.R', package='WuKong'))
+      rstudioapi::jobRunScript(system.file("home/btnTableMerge_LLM.R", package = "WuKong"))
     })
-    ##
-    output$analysisgallery<-renderUI({
-      div(
-        style="margin-top:60px;",
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'ConsensusClustering_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/ConsensusClustering_LLM", target = "_blank",
-                #       #tags$img(src = "ConsensusClustering_LLM.png",alt = "Consensus clustering", width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Consensus clustering")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Achieve robust clustering results through consensus clustering with LLM support. This tool enhances data reliability by combining multiple clustering results for improved accuracy.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnConsensusClustering_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'DEPannova_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/DEPannova_LLM", target = "_blank",
-                #       #tags$img(src = "DEPannova_LLM.png",alt = "One-way ANOVA",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("One-way ANOVA")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform differential expression analysis using one-way ANOVA tests with the help of LLMs. This tool is valuable for identifying significant differences between groups in datasets.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnDEPannova_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'DEPlimma_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/DEPlimma_LLM", target = "_blank",
-                #       #tags$img(src = "DEPlimma_LLM.png",alt = "Limma",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Limma")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Conduct differential expression analysis with the Limma package, guided by LLMs. This method is widely used in omics research.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnDEPlimma_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'DEPsamr_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/DEPsamr_LLM", target = "_blank",
-                #       #tags$img(src = "DEPsamr_LLM.png",alt = "SAMR",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("SAMR")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Utilize SAMR (Significance Analysis of Microarrays) for differential expression analysis. LLMs provide step-by-step support for accurate and efficient analysis.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnDEPsamr_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'DEPttest_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/DEPttest_LLM", target = "_blank",
-                #       #tags$img(src = "DEPttest_LLM.png",alt = "Student's t-Test",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Student's t-Test")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform differential expression analysis using Student's t-test with LLM guidance. This statistical method identifies significant differences between two groups.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnDEPttest_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'DEPwilcox_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/DEPwilcox_LLM", target = "_blank",
-                #       #tags$img(src = "DEPwilcox_LLM.png",alt = "Wilcoxon Rank Sum and Signed Rank Tests",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Wilcoxon Rank Sum and Signed Rank Tests")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Conduct non-parametric differential expression analysis using Wilcoxon tests. LLMs assist in ensuring accurate and reliable results.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnDEPwilcox_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'DNB_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/DNB_LLM", target = "_blank",
-                #       #tags$img(src = "DNB_LLM.png",alt = "Dynamic Network Biomarkers",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Dynamic Network Biomarkers")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Identify dynamic network biomarkers (DNBs) with LLM support. This tool is crucial for understanding critical transitions in biological systems.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnDNB_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'FactorAnalysis_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/FactorAnalysis_LLM", target = "_blank",
-                #       #tags$img(src = "FactorAnalysis_LLM.png",alt = "Factor Analysis",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Factor Analysis")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform factor analysis to uncover underlying variables in datasets. LLMs guide users through the process, ensuring accurate and interpretable results.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnFactorAnalysis_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'GRA_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/GRA_LLM", target = "_blank",
-                #       #tags$img(src = "GRA_LLM.png",alt = "Grey Relational Analysis",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Grey Relational Analysis")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Conduct Grey Relational Analysis (GRA) to evaluate relationships between variables. LLMs provide insights and simplify the analysis process for better decision-making.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnGRA_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'HCA_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/HCA_LLM", target = "_blank",
-                #       #tags$img(src = "HCA_LLM.png",alt = "Hierarchical Cluster Analysis",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Hierarchical Cluster Analysis")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform hierarchical cluster analysis (HCA) with LLM support. This tool helps organize data into meaningful groups based on similarity.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnHCA_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'Kmeans_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/Kmeans_LLM", target = "_blank",
-                #       #tags$img(src = "Kmeans_LLM.png",alt = "K-means clustering",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("K-means Clustering")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Conduct K-means clustering with LLM support. This tool helps partition datasets into clusters based on similarity, simplifying data segmentation.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnKmeans_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'LackofFit_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/LackofFit_LLM", target = "_blank",
-                #       #tags$img(src = "LackofFit_LLM.png",alt = "Lack of Fit F-test",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Lack of Fit F-test")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform Lack of Fit F-tests to evaluate the adequacy of regression models. LLMs assist in interpreting results and identifying model improvements.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnLackofFit_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'LinearRegression_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/LinearRegression_LLM", target = "_blank",
-                #       #tags$img(src = "LinearRegression_LLM.png",alt = "Linear Regression",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Linear Regression")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Conduct linear regression analysis with the help of LLMs. This tool models relationships between variables and provides insights into predictive trends.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnLinearRegression_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'LogisticRegression_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/LogisticRegression_LLM", target = "_blank",
-                #       #tags$img(src = "LogisticRegression_LLM.png",alt = "Logistic Regression",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Logistic Regression")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform logistic regression analysis with LLM support. This statistical method is ideal for modeling binary outcomes and identifying significant predictors.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnLogisticRegression_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'Mfuzz_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/Mfuzz_LLM", target = "_blank",
-                #       #tags$img(src = "Mfuzz_LLM.png",alt = "Mfuzz",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Mfuzz")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform fuzzy clustering using the Mfuzz package with LLM guidance. This tool is particularly useful for analyzing time-series data in biological studies.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnMfuzz_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'NDM_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/NDM_LLM", target = "_blank",
-                #       #tags$img(src = "NDM_LLM.png",alt = "Network Degree Matrix",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Network Degree Matrix")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Analyze network structures using the Network Degree Matrix (NDM). LLMs assist in interpreting network connectivity and relationships.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnNDM_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'OPLSDA_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/OPLSDA_LLM", target = "_blank",
-                #       #tags$img(src = "OPLSDA_LLM.png",alt = "OPLS-DA",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("OPLS-DA")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform Orthogonal Partial Least Squares Discriminant Analysis (OPLS-DA) with LLM support. This tool is widely used for classification and biomarker discovery.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnOPLSDA_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'PCA_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/PCA_LLM", target = "_blank",
-                #       #tags$img(src = "PCA_LLM.png",alt = "PCA",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("PCA")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Conduct Principal Component Analysis (PCA) with LLM guidance. This tool reduces data dimensionality while preserving important information.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnPCA_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'PCoA_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/PCoA_LLM", target = "_blank",
-                #       #tags$img(src = "PCoA_LLM.png",alt = "PCoA",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("PCoA")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform Principal Coordinates Analysis (PCoA) to explore similarities or dissimilarities in data. LLMs guide users through the process for effective visualization.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnPCoA_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'PLSDA_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/PLSDA_LLM", target = "_blank",
-                #       #tags$img(src = "PLSDA_LLM.png",alt = "PLS-DA",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("PLS-DA")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Conduct Partial Least Squares Discriminant Analysis (PLS-DA) with LLM support. This tool is ideal for classification and feature selection in high-dimensional data.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnPLSDA_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'PowerAnalysis_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/PowerAnalysis_LLM", target = "_blank",
-                #       #tags$img(src = "PowerAnalysis_LLM.png",alt = "Power Analysis",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Power Analysis")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform power analysis to determine the sample size needed for statistical tests. LLMs provide insights and ensure accurate calculations.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnPowerAnalysis_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'RCS_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/RCS_LLM", target = "_blank",
-                #       #tags$img(src = "RCS_LLM.png",alt = "Restricted Cubic Spline Analysis",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Restricted Cubic Spline Analysis")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform Restricted Cubic Spline (RCS) analysis to model non-linear relationships. LLMs assist in interpreting results and creating visualizations.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnRCS_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'RDA_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/RCS_LLM", target = "_blank",
-                #       #tags$img(src = "RCS_LLM.png",alt = "Restricted Cubic Spline Analysis",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Redundancy Analysis")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Conduct Redundancy Analysis (RDA) to explore relationships between datasets. LLMs provide guidance for accurate and interpretable results.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnRDA_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'RRHO_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/RRHO_LLM", target = "_blank",
-                #       #tags$img(src = "RRHO_LLM.png",alt = "Rank Rank Hypergeometric Overlap Analysis",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Rank Rank Hypergeometric Overlap Analysis")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform Rank Rank Hypergeometric Overlap Analysis (RRHO) analysis to identify overlaps between ranked datasets. LLMs guide users in uncovering meaningful intersections.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnRRHO_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'SIMCA_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/SIMCA_LLM", target = "_blank",
-                #       #tags$img(src = "SIMCA_LLM.png",alt = "Soft independent modelling by class analogy",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Soft independent modelling by class analogy")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform SIMCA for classification analysis. LLMs provide guidance in creating robust and interpretable models.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnSIMCA_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'timecourse_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/timecourse_LLM", target = "_blank",
-                #       #tags$img(src = "timecourse_LLM.png",alt = "Time Course Data Analysis",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Time Course Data Analysis")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Analyze time-course data effectively with LLM guidance. This tool is ideal for exploring trends and changes over time.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btntimecourse_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'tsne_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/tsne_LLM", target = "_blank",
-                #       #tags$img(src = "tsne_LLM.png",alt = "t-SNE",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("t-SNE")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform t-Distributed Stochastic Neighbor Embedding (t-SNE) for dimensionality reduction and data visualization. LLMs assist in creating interpretable results.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btntsne_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'umap_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/umap_LLM", target = "_blank",
-                #       #tags$img(src = "umap_LLM.png",alt = "UMAP",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("UMAP")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Conduct Uniform Manifold Approximation and Projection (UMAP) for dimensionality reduction. LLMs guide users in creating clear visualizations.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnumap_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'TumorPurity_LLM.png', width="200px",height = "200px")
-                ##tags$a(href = "http://localhost:3838/TumorPurity_LLM", target = "_blank",
-                #      #tags$img(src = "TumorPurity_LLM.png",alt = "Estimate Tumor Purity",
-                #                width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Estimate Tumor Purity")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Estimate tumor purity levels with LLM support. This tool aids in cancer research by providing insights into tumor composition.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnTumorPurity_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        )
+    # ============================================================
+    # Helper: render original-style module gallery
+    # ============================================================
+
+    render_wukong_module_gallery <- function(modules) {
+      # Split modules into rows of 3 to avoid Bootstrap float misalignment
+      module_rows <- split(
+        modules,
+        ceiling(seq_along(modules) / 3)
       )
-    })
-    observeEvent(input$btnConsensusClustering_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnConsensusClustering_LLM.R', package='WuKong'))
-    })
 
-    observeEvent(input$btnDEPannova_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnDEPannova_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnDEPlimma_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnDEPlimma_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnDEPsamr_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnDEPsamr_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnDEPttest_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnDEPttest_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnDEPwilcox_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnDEPwilcox_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnDNB_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnDNB_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnFactorAnalysis_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnFactorAnalysis_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnGRA_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnGRA_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnHCA_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnHCA_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnKmeans_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnKmeans_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnLackofFit_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnLackofFit_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnLinearRegression_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnLinearRegression_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnLogisticRegression_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnLogisticRegression_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnMfuzz_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnMfuzz_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnNDM_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnNDM_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnOPLSDA_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnOPLSDA_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnPCA_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnPCA_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnPCoA_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnPCoA_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnPLSDA_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnPLSDA_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnPowerAnalysis_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnPowerAnalysis_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnRCS_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnRCS_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnRDA_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnRDA_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnRRHO_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnRRHO_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnSIMCA_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnSIMCA_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btntimecourse_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btntimecourse_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btntsne_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btntsne_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnTumorPurity_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnTumorPurity_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnumap_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnumap_LLM.R', package='WuKong'))
-    })
-    ##
-    output$functionalgallery<-renderUI({
       div(
-        style="margin-top:60px;",
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'Celltype_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/Celltype_LLM", target = "_blank",
-                #tags$img(src = "Celltype_LLM.png",alt = "Cell Type Annotation", width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Cell Type Annotation")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Annotate and classify cell types effectively using LLMs. This tool is particularly useful for biological and medical research, ensuring accurate and efficient cell-type identification.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnCelltype_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
+        style = "margin-top:60px;",
+
+        lapply(module_rows, function(row_modules) {
+          fluidRow(
+            style = "margin-bottom:30px; display:flex; align-items:stretch;",
+
+            lapply(row_modules, function(m) {
+              column(
+                4,
+                style = "display:flex;",
+
+                div(
+                  style = "
+                text-align:center;
+                width:100%;
+                margin-top:0px;
+                padding:20px;
+                border-radius:10px;
+                box-shadow:0px 4px 6px rgba(0, 0, 0, 0.1);
+                transition:transform 0.2s;
+                background:#f9fafb;
+                display:flex;
+                flex-direction:column;
+                justify-content:space-between;
+                min-height:390px;
+              ",
+                  class = "module-box",
+
+                  div(
+                    img(
+                      src = m$img,
+                      width = "200px",
+                      height = "200px",
+                      style = "object-fit:contain;"
+                    )
+                  ),
+
+                  div(
+                    style = "
+                  margin-top:15px;
+                  text-align:center;
+                  font-size:120%;
+                  font-weight:bold;
+                  color:#1f2937;
+                  min-height:44px;
+                  display:flex;
+                  align-items:center;
+                  justify-content:center;
+                ",
+                    HTML(m$title)
+                  ),
+
+                  div(
+                    style = "
+                  margin-top:10px;
+                  text-align:center;
+                  font-size:110%;
+                  color:#6b7280;
+                  word-wrap:break-word;
+                  min-height:76px;
+                  display:flex;
+                  align-items:center;
+                  justify-content:center;
+                ",
+                    HTML(m$description)
+                  ),
+
+                  div(
+                    style = "text-align:center; margin-top:15px;",
+                    actionButton(
+                      m$button,
+                      "Start",
+                      style = "
+                    background-color:#3b82f6;
+                    color:white;
+                    border-radius:5px;
+                    padding:8px 15px;
+                    border:none;
+                  "
+                    )
+                  )
+                )
               )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'ExploreGO_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/ExploreGO_LLM", target = "_blank",
-                #tags$img(src = "ExploreGO_LLM.png",alt = "Exploring Gene/Protein Functions Based On GO Database",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Exploring Gene/Protein Functions Based On GO Database")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Explore gene and protein functions using the Gene Ontology (GO) database. LLMs provide insights and aid in functional annotation and analysis.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnExploreGO_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'GOenrich_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/GOenrich_LLM", target = "_blank",
-                #tags$img(src = "GOenrich_LLM.png",alt = "GO Enrichment Analysis",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("GO Enrichment Analysis")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform Gene Ontology (GO) enrichment analysis with the guidance of LLMs. This tool identifies significantly enriched biological processes, molecular functions, and cellular components.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnGOenrich_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
+            })
           )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'KEGGenrich_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/KEGGenrich_LLM", target = "_blank",
-                #tags$img(src = "KEGGenrich_LLM.png",alt = "KEGG Enrichment Analysis",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("KEGG Enrichment Analysis")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform Kyoto Encyclopedia of Genes and Genomes (KEGG) enrichment analysis with LLM guidance. This tool identifies enriched pathways and biological processes.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnKEGGenrich_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'gseaGO_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/KEGGenrich_LLM", target = "_blank",
-                #tags$img(src = "KEGGenrich_LLM.png",alt = "KEGG Enrichment Analysis",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Gene Set Enrichment Analysis of Gene Ontology")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform Gene Set Enrichment Analysis of Gene Ontology (GO) with LLM guidance.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btngseaGO_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'gseaKEGG_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/KEGGenrich_LLM", target = "_blank",
-                #tags$img(src = "KEGGenrich_LLM.png",alt = "KEGG Enrichment Analysis",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Gene Set Enrichment Analysis of KEGG")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform Gene Set Enrichment Analysis of Kyoto Encyclopedia of Genes and Genomes (KEGG) with LLM guidance.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btngseaKEGG_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        )
+        })
       )
-    })
-    observeEvent(input$btnCelltype_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnCelltype_LLM.R', package='WuKong'))
-    })
+    }
 
-    observeEvent(input$btnExploreGO_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnExploreGO_LLM.R', package='WuKong'))
-    })
+    register_wukong_job_buttons <- function(modules) {
+      lapply(modules, function(m) {
+        local({
+          mx <- m
+          observeEvent(input[[mx$button]], {
+            rstudioapi::jobRunScript(
+              system.file(
+                paste0("home/", mx$script),
+                package = "WuKong"
+              )
+            )
+          })
+        })
+      })
+    }
 
-    observeEvent(input$btnGOenrich_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnGOenrich_LLM.R', package='WuKong'))
-    })
+    # ============================================================
+    # Original Statistical Analysis gallery
+    # ============================================================
 
-    observeEvent(input$btnKEGGenrich_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnKEGGenrich_LLM.R', package='WuKong'))
-    })
-    observeEvent(input$btngseaGO_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btngseaGO_LLM.R', package='WuKong'))
-    })
-    observeEvent(input$btngseaKEGG_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btngseaKEGG_LLM.R', package='WuKong'))
-    })
-    ##
-    output$visualizationgallery<-renderUI({
-      div(
-        style="margin-top:60px;",
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'Barplot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/Barplot_LLM", target = "_blank",
-                #tags$img(src = "Barplot_LLM.png",alt = "Barplot", width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Barplot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create and customize bar plots with the help of large language models. This tool simplifies the visualization of categorical data, making it easier to analyze patterns and trends.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnBarplot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'BarPointplot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/BarPointplot_LLM", target = "_blank",
-                #tags$img(src = "BarPointplot_LLM.png",alt = "Bar and Point Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Bar and Point Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("This feature combines bar and point plots to provide a comprehensive visualization of data. It uses LLMs to guide users in creating detailed and informative plots that highlight key data points.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnBarPointplot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'BoxPointplot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/BoxPointplot_LLM", target = "_blank",
-                #tags$img(src = "BoxPointplot_LLM.png",alt = "Box and Point Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Box and Point Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Generate box and point plots effortlessly with the support of LLMs. This tool is ideal for visualizing distributions and comparing individual data points within a dataset.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnBoxPointplot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'ClusterCorNetwork_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/ClusterCorNetwork_LLM", target = "_blank",
-                #tags$img(src = "ClusterCorNetwork_LLM.png",alt = "Clustering using Correlation Network",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Clustering using Correlation Network")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Perform clustering analysis using correlation networks with the guidance of LLMs. This method helps uncover relationships and groupings within complex datasets.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnClusterCorNetwork_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'ContourPlot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/ContourPlot_LLM", target = "_blank",
-                #tags$img(src = "ContourPlot_LLM.png",alt = "Contour Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Contour Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create contour plots to visualize three-dimensional data in two dimensions. LLMs assist in generating clear and informative plots for advanced data analysis.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnContourPlot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'CorPlot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/CorPlot_LLM", target = "_blank",
-                #tags$img(src = "CorPlot_LLM.png",alt = "Correlation Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Correlation Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Visualize relationships between variables using correlation plots. LLMs simplify the process, ensuring accurate representation and interpretation of data correlations.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnCorPlot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'CorrelationNetwork_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/CorrelationNetwork_LLM", target = "_blank",
-                #tags$img(src = "CorrelationNetwork_LLM.png",alt = "Correlation Network Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Correlation Network Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Construct correlation network plots with ease using LLMs. This tool helps visualize complex relationships and interactions between variables in a network format.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnCorrelationNetwork_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'CrossErrorbarplot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/CrossErrorbarplot_LLM", target = "_blank",
-                #tags$img(src = "CrossErrorbarplot_LLM.png",alt = "Cross Error Bar Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Cross Error Bar Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Design cross error bar plots to represent data variability. LLMs provide guidance in creating precise and visually appealing plots for statistical analysis.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnCrossErrorbarplot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'Dendrogram_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/Dendrogram_LLM", target = "_blank",
-                #tags$img(src = "Dendrogram_LLM.png",alt = "Dendrogram",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Dendrogram")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Generate dendrograms for hierarchical clustering analysis. LLMs assist in creating detailed and interpretable tree-like diagrams for data classification.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnDendrogram_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'DivergingBarplot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/DivergingBarplot_LLM", target = "_blank",
-                #tags$img(src = "DivergingBarplot_LLM.png",alt = "Diverging Bar Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Diverging Bar Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create diverging bar plots to represent data deviations. LLMs simplify the process, enabling clear visualization of positive and negative trends.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnDivergingBarplot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'FunnelPlot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/FunnelPlot_LLM", target = "_blank",
-                #tags$img(src = "FunnelPlot_LLM.png",alt = "Funnel Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Funnel Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create funnel plots to assess data variability and bias. LLMs assist in generating clear and informative visualizations for meta-analysis.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnFunnelPlot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'ggseqlogo_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/ggseqlogo_LLM", target = "_blank",
-                #tags$img(src = "ggseqlogo_LLM.png",alt = "Protein/DNA Sequence Logo Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Protein/DNA Sequence Logo Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Generate sequence logo plots for protein or DNA sequences. LLMs simplify the process, highlighting conserved regions and sequence patterns.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnggseqlogo_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'ggtreeDendrogram_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/ggtreeDendrogram_LLM", target = "_blank",
-                #tags$img(src = "ggtreeDendrogram_LLM.png",alt = "Dendrogram using ggtree Package",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Dendrogram using ggtree Package")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create dendrograms using the ggtree package for advanced hierarchical clustering visualization. LLMs assist in generating detailed and publication-ready dendrograms.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnggtreeDendrogram_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'Heatscatter_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/Heatscatter_LLM", target = "_blank",
-                #tags$img(src = "Heatscatter_LLM.png",alt = "Colored Scatter Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Colored Scatter Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Generate heatscatter plots that combine scatterplots with color gradients to represent data density. LLMs assist in creating visually appealing and informative plots.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnHeatscatter_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'HistgramDensity_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/HistgramDensity_LLM", target = "_blank",
-                #tags$img(src = "HistgramDensity_LLM.png",alt = "Histgram and Density Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Histgram and Density Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create combined histogram and density plots to visualize data distributions. LLMs provide guidance in customizing and interpreting these plots.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnHistgramDensity_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'LollipopChart_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/LollipopChart_LLM", target = "_blank",
-                #tags$img(src = "LollipopChart_LLM.png",alt = "Lollipop Chart",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Lollipop Chart")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create lollipop charts for visualizing data comparisons. LLMs simplify the process, ensuring clear and effective data representation.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnLollipopChart_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'MarginalPlot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/MarginalPlot_LLM", target = "_blank",
-                #tags$img(src = "MarginalPlot_LLM.png",alt = "Marginal Histogram/Boxplot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Marginal Histogram/Boxplot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Generate marginal histogram or boxplots to visualize data distributions alongside scatterplots. LLMs provide assistance in creating detailed visualizations.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnMarginalPlot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'NightingalePlot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/NightingalePlot_LLM", target = "_blank",
-                #tags$img(src = "NightingalePlot_LLM.png",alt = "Nightingale Rose Diagram",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Nightingale Rose Diagram")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create Nightingale Rose Diagrams to visualize circular data distributions. LLMs simplify the process, ensuring accurate and visually appealing plots.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnNightingalePlot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'PairPointPlot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/PairPointPlot_LLM", target = "_blank",
-                #tags$img(src = "PairPointPlot_LLM.png",alt = "Pair Point Line Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Pair Point Line Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create pair point line plots to visualize paired data relationships. LLMs assist in generating clear and interpretable plots.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnPairPointPlot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'PiePlot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/PiePlot_LLM", target = "_blank",
-                #tags$img(src = "PiePlot_LLM.png",alt = "Pie Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Pie Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create pie charts to visualize categorical data distributions. LLMs simplify the customization and interpretation of these plots.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnPiePlot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'RadarChart_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/RadarChart_LLM", target = "_blank",
-                #tags$img(src = "RadarChart_LLM.png",alt = "Radar Chart",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Radar Chart")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create radar charts to compare multivariate data. LLMs assist in generating informative and visually appealing plots.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnRadarChart_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'RainCloud_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/RainCloud_LLM", target = "_blank",
-                #tags$img(src = "RainCloud_LLM.png",alt = "Rain Cloud Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Rain Cloud Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Generate rain cloud plots to visualize data distributions. LLMs guide users in creating combined density and scatter plots.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnRainCloud_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'RankPointPlot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/RankPointPlot_LLM", target = "_blank",
-                #tags$img(src = "RankPointPlot_LLM.png",alt = "Rank Point Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Rank Point Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create rank point plots to highlight data rankings. LLMs simplify the process, ensuring clear and effective visualization.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnRankPointPlot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'RidgePlot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/RidgePlot_LLM", target = "_blank",
-                #tags$img(src = "RidgePlot_LLM.png",alt = "Ridge Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Ridge Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create ridge plots to visualize distributions across multiple categories. LLMs assist in generating aesthetically pleasing and informative plots.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnRidgePlot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'ROCplot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/ROCplot_LLM", target = "_blank",
-                #tags$img(src = "ROCplot_LLM.png",alt = "ROC Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("ROC Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Generate Receiver Operating Characteristic (ROC) plots to evaluate classification model performance. LLMs provide insights for accurate interpretation.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnROCplot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'SankeyPlot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/SankeyPlot_LLM", target = "_blank",
-                #tags$img(src = "SankeyPlot_LLM.png",alt = "Sankey Chart",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Sankey Chart")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create Sankey charts to visualize data flows and relationships. LLMs simplify the process, ensuring accurate and engaging visualizations.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnSankeyPlot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'ScatterEllipsePlot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/ScatterEllipsePlot_LLM", target = "_blank",
-                #tags$img(src = "ScatterEllipsePlot_LLM.png",alt = "Scatter Ellipse Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Scatter Ellipse Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Generate scatter plots with ellipses to highlight data groupings. LLMs assist in creating detailed and informative visualizations.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnScatterEllipsePlot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'SurvivalPlot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/SurvivalPlot_LLM", target = "_blank",
-                #tags$img(src = "SurvivalPlot_LLM.png",alt = "Survival analysis",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Survival analysis")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create survival plots to analyze time-to-event data. LLMs simplify the process, ensuring accurate and clear visualizations.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnSurvivalPlot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'TernaryPlot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/TernaryPlot_LLM", target = "_blank",
-                #tags$img(src = "TernaryPlot_LLM.png",alt = "Ternary Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Ternary Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create ternary plots to visualize three-component data. LLMs provide guidance in generating accurate and aesthetically pleasing plots.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnTernaryPlot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'UpsetPlot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/UpsetPlot_LLM", target = "_blank",
-                #tags$img(src = "UpsetPlot_LLM.png",alt = "UpSet Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("UpSet Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create UpSet plots to visualize intersections between sets. LLMs simplify the process, ensuring accurate and engaging visualizations.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnUpsetPlot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'Venn_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/Venn_LLM", target = "_blank",
-                #tags$img(src = "Venn_LLM.png",alt = "Venn Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Venn Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Generate Venn plots to display overlaps between sets. LLMs assist in creating clear and informative diagrams.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnVenn_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'Violinplot_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/Violinplot_LLM", target = "_blank",
-                #tags$img(src = "Violinplot_LLM.png",alt = "Violin Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Violin Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create violin plots to visualize data distributions. LLMs guide users in generating detailed and interpretable plots.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnViolinplot_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          ),
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'Volcano_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/Volcano_LLM", target = "_blank",
-                #tags$img(src = "Volcano_LLM.png",alt = "Volcano Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Volcano Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Generate volcano plots to identify significant changes in data. LLMs simplify the process, ensuring accurate and visually appealing results.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnVolcano_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        ),
-        fluidRow(
-          column(
-            4,
-            div(
-              style = "text-align:center; margin-top:40px; margin-left:0%; padding:20px; border-radius:10px; box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1); transition: transform 0.2s; background: #f9fafb;",
-              class = "module-box",
-              div(
-                img(src = 'WorldCloud_LLM.png', width="200px",height = "200px")
-                #tags$a(href = "http://localhost:3838/WorldCloud_LLM", target = "_blank",
-                #tags$img(src = "WorldCloud_LLM.png",alt = "Word Cloud Plot",
-                #width="200px",height = "200px"))
-              ),
-              div(
-                style = "margin-top:15px; text-align:center; font-size:120%; font-weight:bold; color:#1f2937;",
-                HTML("Word Cloud Plot")
-              ),
-              div(
-                style = "margin-top:10px; text-align:center; font-size:110%; color:#6b7280;word-wrap: break-word;",
-                HTML("Create word clouds to visualize text data. LLMs assist in generating aesthetically pleasing and informative visualizations.")
-              ),
-              div(
-                style = "text-align:center; margin-top:15px;",
-                actionButton("btnWorldCloud_LLM", "Start", style = "background-color: #3b82f6; color: white; border-radius: 5px; padding: 8px 15px;")
-              )
-            )
-          )
-        )
+    analysis_modules_original <- list(
+      list(
+        button = "btnConsensusClustering_LLM",
+        script = "btnConsensusClustering_LLM.R",
+        img = "ConsensusClustering_LLM.png",
+        title = "Consensus clustering",
+        description = "Achieve robust clustering results through consensus clustering with LLM support. This tool enhances data reliability by combining multiple clustering results for improved accuracy."
+      ),
+      list(
+        button = "btnDEPannova_LLM",
+        script = "btnDEPannova_LLM.R",
+        img = "DEPannova_LLM.png",
+        title = "One-way ANOVA",
+        description = "Perform differential expression analysis using one-way ANOVA tests with the help of LLMs. This tool is valuable for identifying significant differences between groups in datasets."
+      ),
+      list(
+        button = "btnDEPlimma_LLM",
+        script = "btnDEPlimma_LLM.R",
+        img = "DEPlimma_LLM.png",
+        title = "Limma",
+        description = "Conduct differential expression analysis with the Limma package, guided by LLMs. This method is widely used in omics research."
+      ),
+      list(
+        button = "btnDEPsamr_LLM",
+        script = "btnDEPsamr_LLM.R",
+        img = "DEPsamr_LLM.png",
+        title = "SAMR",
+        description = "Utilize SAMR (Significance Analysis of Microarrays) for differential expression analysis. LLMs provide step-by-step support for accurate and efficient analysis."
+      ),
+      list(
+        button = "btnDEPttest_LLM",
+        script = "btnDEPttest_LLM.R",
+        img = "DEPttest_LLM.png",
+        title = "Student's t-Test",
+        description = "Perform differential expression analysis using Student's t-test with LLM guidance. This statistical method identifies significant differences between two groups."
+      ),
+      list(
+        button = "btnDEPwilcox_LLM",
+        script = "btnDEPwilcox_LLM.R",
+        img = "DEPwilcox_LLM.png",
+        title = "Wilcoxon Rank Sum and Signed Rank Tests",
+        description = "Conduct non-parametric differential expression analysis using Wilcoxon tests. LLMs assist in ensuring accurate and reliable results."
+      ),
+      list(
+        button = "btnDNB_LLM",
+        script = "btnDNB_LLM.R",
+        img = "DNB_LLM.png",
+        title = "Dynamic Network Biomarkers",
+        description = "Identify dynamic network biomarkers (DNBs) with LLM support. This tool is crucial for understanding critical transitions in biological systems."
+      ),
+      list(
+        button = "btnFactorAnalysis_LLM",
+        script = "btnFactorAnalysis_LLM.R",
+        img = "FactorAnalysis_LLM.png",
+        title = "Factor Analysis",
+        description = "Perform factor analysis to uncover underlying variables in datasets. LLMs guide users through the process, ensuring accurate and interpretable results."
+      ),
+      list(
+        button = "btnGRA_LLM",
+        script = "btnGRA_LLM.R",
+        img = "GRA_LLM.png",
+        title = "Grey Relational Analysis",
+        description = "Conduct Grey Relational Analysis (GRA) to evaluate relationships between variables. LLMs provide insights and simplify the analysis process for better decision-making."
+      ),
+      list(
+        button = "btnHCA_LLM",
+        script = "btnHCA_LLM.R",
+        img = "HCA_LLM.png",
+        title = "Hierarchical Cluster Analysis",
+        description = "Perform hierarchical cluster analysis (HCA) with LLM support. This tool helps organize data into meaningful groups based on similarity."
+      ),
+      list(
+        button = "btnKmeans_LLM",
+        script = "btnKmeans_LLM.R",
+        img = "Kmeans_LLM.png",
+        title = "K-means Clustering",
+        description = "Conduct K-means clustering with LLM support. This tool helps partition datasets into clusters based on similarity, simplifying data segmentation."
+      ),
+      list(
+        button = "btnLackofFit_LLM",
+        script = "btnLackofFit_LLM.R",
+        img = "LackofFit_LLM.png",
+        title = "Lack of Fit F-test",
+        description = "Perform Lack of Fit F-tests to evaluate the adequacy of regression models. LLMs assist in interpreting results and identifying model improvements."
+      ),
+      list(
+        button = "btnLinearRegression_LLM",
+        script = "btnLinearRegression_LLM.R",
+        img = "LinearRegression_LLM.png",
+        title = "Linear Regression",
+        description = "Conduct linear regression analysis with the help of LLMs. This tool models relationships between variables and provides insights into predictive trends."
+      ),
+      list(
+        button = "btnLogisticRegression_LLM",
+        script = "btnLogisticRegression_LLM.R",
+        img = "LogisticRegression_LLM.png",
+        title = "Logistic Regression",
+        description = "Perform logistic regression analysis with LLM support. This statistical method is ideal for modeling binary outcomes and identifying significant predictors."
+      ),
+      list(
+        button = "btnMfuzz_LLM",
+        script = "btnMfuzz_LLM.R",
+        img = "Mfuzz_LLM.png",
+        title = "Mfuzz",
+        description = "Perform fuzzy clustering using the Mfuzz package with LLM guidance. This tool is particularly useful for analyzing time-series data in biological studies."
+      ),
+      list(
+        button = "btnNDM_LLM",
+        script = "btnNDM_LLM.R",
+        img = "NDM_LLM.png",
+        title = "Network Degree Matrix",
+        description = "Analyze network structures using the Network Degree Matrix (NDM). LLMs assist in interpreting network connectivity and relationships."
+      ),
+      list(
+        button = "btnOPLSDA_LLM",
+        script = "btnOPLSDA_LLM.R",
+        img = "OPLSDA_LLM.png",
+        title = "OPLS-DA",
+        description = "Perform Orthogonal Partial Least Squares Discriminant Analysis (OPLS-DA) with LLM support. This tool is widely used for classification and biomarker discovery."
+      ),
+      list(
+        button = "btnPCA_LLM",
+        script = "btnPCA_LLM.R",
+        img = "PCA_LLM.png",
+        title = "PCA",
+        description = "Conduct Principal Component Analysis (PCA) with LLM guidance. This tool reduces data dimensionality while preserving important information."
+      ),
+      list(
+        button = "btnPCoA_LLM",
+        script = "btnPCoA_LLM.R",
+        img = "PCoA_LLM.png",
+        title = "PCoA",
+        description = "Perform Principal Coordinates Analysis (PCoA) to explore similarities or dissimilarities in data. LLMs guide users through the process for effective visualization."
+      ),
+      list(
+        button = "btnPLSDA_LLM",
+        script = "btnPLSDA_LLM.R",
+        img = "PLSDA_LLM.png",
+        title = "PLS-DA",
+        description = "Conduct Partial Least Squares Discriminant Analysis (PLS-DA) with LLM support. This tool is ideal for classification and feature selection in high-dimensional data."
+      ),
+      list(
+        button = "btnPowerAnalysis_LLM",
+        script = "btnPowerAnalysis_LLM.R",
+        img = "PowerAnalysis_LLM.png",
+        title = "Power Analysis",
+        description = "Perform power analysis to determine the sample size needed for statistical tests. LLMs provide insights and ensure accurate calculations."
+      ),
+      list(
+        button = "btnRCS_LLM",
+        script = "btnRCS_LLM.R",
+        img = "RCS_LLM.png",
+        title = "Restricted Cubic Spline Analysis",
+        description = "Perform Restricted Cubic Spline (RCS) analysis to model non-linear relationships. LLMs assist in interpreting results and creating visualizations."
+      ),
+      list(
+        button = "btnRDA_LLM",
+        script = "btnRDA_LLM.R",
+        img = "RDA_LLM.png",
+        title = "Redundancy Analysis",
+        description = "Conduct Redundancy Analysis (RDA) to explore relationships between datasets. LLMs provide guidance for accurate and interpretable results."
+      ),
+      list(
+        button = "btnRRHO_LLM",
+        script = "btnRRHO_LLM.R",
+        img = "RRHO_LLM.png",
+        title = "Rank Rank Hypergeometric Overlap Analysis",
+        description = "Perform Rank Rank Hypergeometric Overlap Analysis (RRHO) analysis to identify overlaps between ranked datasets. LLMs guide users in uncovering meaningful intersections."
+      ),
+      list(
+        button = "btnSIMCA_LLM",
+        script = "btnSIMCA_LLM.R",
+        img = "SIMCA_LLM.png",
+        title = "Soft independent modelling by class analogy",
+        description = "Perform SIMCA for classification analysis. LLMs provide guidance in creating robust and interpretable models."
+      ),
+      list(
+        button = "btntimecourse_LLM",
+        script = "btntimecourse_LLM.R",
+        img = "timecourse_LLM.png",
+        title = "Time Course Data Analysis",
+        description = "Analyze time-course data effectively with LLM guidance. This tool is ideal for exploring trends and changes over time."
+      ),
+      list(
+        button = "btntsne_LLM",
+        script = "btntsne_LLM.R",
+        img = "tsne_LLM.png",
+        title = "t-SNE",
+        description = "Perform t-Distributed Stochastic Neighbor Embedding (t-SNE) for dimensionality reduction and data visualization. LLMs assist in creating interpretable results."
+      ),
+      list(
+        button = "btnumap_LLM",
+        script = "btnumap_LLM.R",
+        img = "umap_LLM.png",
+        title = "UMAP",
+        description = "Conduct Uniform Manifold Approximation and Projection (UMAP) for dimensionality reduction. LLMs guide users in creating clear visualizations."
+      ),
+      list(
+        button = "btnTumorPurity_LLM",
+        script = "btnTumorPurity_LLM.R",
+        img = "TumorPurity_LLM.png",
+        title = "Estimate Tumor Purity",
+        description = "Estimate tumor purity levels with LLM support. This tool aids in cancer research by providing insights into tumor composition."
       )
-    })
-    observeEvent(input$btnBarplot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnBarplot_LLM.R', package='WuKong'))
+    )
+
+    output$analysisgallery <- renderUI({
+      render_wukong_module_gallery(analysis_modules_original)
     })
 
-    observeEvent(input$btnBarPointplot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnBarPointplot_LLM.R', package='WuKong'))
+    register_wukong_job_buttons(analysis_modules_original)
+
+    # ============================================================
+    # Original Functional Annotation gallery
+    # ============================================================
+
+    functional_modules_original <- list(
+      list(
+        button = "btnCelltype_LLM",
+        script = "btnCelltype_LLM.R",
+        img = "Celltype_LLM.png",
+        title = "Cell Type Annotation",
+        description = "Annotate and classify cell types effectively using LLMs. This tool is particularly useful for biological and medical research, ensuring accurate and efficient cell-type identification."
+      ),
+      list(
+        button = "btnExploreGO_LLM",
+        script = "btnExploreGO_LLM.R",
+        img = "ExploreGO_LLM.png",
+        title = "Exploring Gene/Protein Functions Based On GO Database",
+        description = "Explore gene and protein functions using the Gene Ontology (GO) database. LLMs provide insights and aid in functional annotation and analysis."
+      ),
+      list(
+        button = "btnGOenrich_LLM",
+        script = "btnGOenrich_LLM.R",
+        img = "GOenrich_LLM.png",
+        title = "GO Enrichment Analysis",
+        description = "Perform Gene Ontology (GO) enrichment analysis with the guidance of LLMs. This tool identifies significantly enriched biological processes, molecular functions, and cellular components."
+      ),
+      list(
+        button = "btnKEGGenrich_LLM",
+        script = "btnKEGGenrich_LLM.R",
+        img = "KEGGenrich_LLM.png",
+        title = "KEGG Enrichment Analysis",
+        description = "Perform Kyoto Encyclopedia of Genes and Genomes (KEGG) enrichment analysis with LLM guidance. This tool identifies enriched pathways and biological processes."
+      ),
+      list(
+        button = "btngseaGO_LLM",
+        script = "btngseaGO_LLM.R",
+        img = "gseaGO_LLM.png",
+        title = "Gene Set Enrichment Analysis of Gene Ontology",
+        description = "Perform Gene Set Enrichment Analysis of Gene Ontology (GO) with LLM guidance."
+      ),
+      list(
+        button = "btngseaKEGG_LLM",
+        script = "btngseaKEGG_LLM.R",
+        img = "gseaKEGG_LLM.png",
+        title = "Gene Set Enrichment Analysis of KEGG",
+        description = "Perform Gene Set Enrichment Analysis of Kyoto Encyclopedia of Genes and Genomes (KEGG) with LLM guidance."
+      )
+    )
+
+    output$functionalgallery <- renderUI({
+      render_wukong_module_gallery(functional_modules_original)
     })
 
-    observeEvent(input$btnBoxPointplot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnBoxPointplot_LLM.R', package='WuKong'))
+    register_wukong_job_buttons(functional_modules_original)
+
+    # ============================================================
+    # Original Data Visualization gallery
+    # ============================================================
+
+    visualization_modules_original <- list(
+      list(
+        button = "btnBarplot_LLM",
+        script = "btnBarplot_LLM.R",
+        img = "Barplot_LLM.png",
+        title = "Barplot",
+        description = "Create and customize bar plots with the help of large language models. This tool simplifies the visualization of categorical data, making it easier to analyze patterns and trends."
+      ),
+      list(
+        button = "btnBarPointplot_LLM",
+        script = "btnBarPointplot_LLM.R",
+        img = "BarPointplot_LLM.png",
+        title = "Bar and Point Plot",
+        description = "This feature combines bar and point plots to provide a comprehensive visualization of data. It uses LLMs to guide users in creating detailed and informative plots that highlight key data points."
+      ),
+      list(
+        button = "btnBoxPointplot_LLM",
+        script = "btnBoxPointplot_LLM.R",
+        img = "BoxPointplot_LLM.png",
+        title = "Box and Point Plot",
+        description = "Generate box and point plots effortlessly with the support of LLMs. This tool is ideal for visualizing distributions and comparing individual data points within a dataset."
+      ),
+      list(
+        button = "btnClusterCorNetwork_LLM",
+        script = "btnClusterCorNetwork_LLM.R",
+        img = "ClusterCorNetwork_LLM.png",
+        title = "Clustering using Correlation Network",
+        description = "Perform clustering analysis using correlation networks with the guidance of LLMs. This method helps uncover relationships and groupings within complex datasets."
+      ),
+      list(
+        button = "btnContourPlot_LLM",
+        script = "btnContourPlot_LLM.R",
+        img = "ContourPlot_LLM.png",
+        title = "Contour Plot",
+        description = "Create contour plots to visualize three-dimensional data in two dimensions. LLMs assist in generating clear and informative plots for advanced data analysis."
+      ),
+      list(
+        button = "btnCorPlot_LLM",
+        script = "btnCorPlot_LLM.R",
+        img = "CorPlot_LLM.png",
+        title = "Correlation Plot",
+        description = "Visualize relationships between variables using correlation plots. LLMs simplify the process, ensuring accurate representation and interpretation of data correlations."
+      ),
+      list(
+        button = "btnCorrelationNetwork_LLM",
+        script = "btnCorrelationNetwork_LLM.R",
+        img = "CorrelationNetwork_LLM.png",
+        title = "Correlation Network Plot",
+        description = "Construct correlation network plots with ease using LLMs. This tool helps visualize complex relationships and interactions between variables in a network format."
+      ),
+      list(
+        button = "btnCrossErrorbarplot_LLM",
+        script = "btnCrossErrorbarplot_LLM.R",
+        img = "CrossErrorbarplot_LLM.png",
+        title = "Cross Error Bar Plot",
+        description = "Design cross error bar plots to represent data variability. LLMs provide guidance in creating precise and visually appealing plots for statistical analysis."
+      ),
+      list(
+        button = "btnDendrogram_LLM",
+        script = "btnDendrogram_LLM.R",
+        img = "Dendrogram_LLM.png",
+        title = "Dendrogram",
+        description = "Generate dendrograms for hierarchical clustering analysis. LLMs assist in creating detailed and interpretable tree-like diagrams for data classification."
+      ),
+      list(
+        button = "btnDivergingBarplot_LLM",
+        script = "btnDivergingBarplot_LLM.R",
+        img = "DivergingBarplot_LLM.png",
+        title = "Diverging Bar Plot",
+        description = "Create diverging bar plots to represent data deviations. LLMs simplify the process, enabling clear visualization of positive and negative trends."
+      ),
+      list(
+        button = "btnFunnelPlot_LLM",
+        script = "btnFunnelPlot_LLM.R",
+        img = "FunnelPlot_LLM.png",
+        title = "Funnel Plot",
+        description = "Create funnel plots to assess data variability and bias. LLMs assist in generating clear and informative visualizations for meta-analysis."
+      ),
+      list(
+        button = "btnggseqlogo_LLM",
+        script = "btnggseqlogo_LLM.R",
+        img = "ggseqlogo_LLM.png",
+        title = "Protein/DNA Sequence Logo Plot",
+        description = "Generate sequence logo plots for protein or DNA sequences. LLMs simplify the process, highlighting conserved regions and sequence patterns."
+      ),
+      list(
+        button = "btnggtreeDendrogram_LLM",
+        script = "btnggtreeDendrogram_LLM.R",
+        img = "ggtreeDendrogram_LLM.png",
+        title = "Dendrogram using ggtree Package",
+        description = "Create dendrograms using the ggtree package for advanced hierarchical clustering visualization. LLMs assist in generating detailed and publication-ready dendrograms."
+      ),
+      list(
+        button = "btnHeatscatter_LLM",
+        script = "btnHeatscatter_LLM.R",
+        img = "Heatscatter_LLM.png",
+        title = "Colored Scatter Plot",
+        description = "Generate heatscatter plots that combine scatterplots with color gradients to represent data density. LLMs assist in creating visually appealing and informative plots."
+      ),
+      list(
+        button = "btnHistgramDensity_LLM",
+        script = "btnHistgramDensity_LLM.R",
+        img = "HistgramDensity_LLM.png",
+        title = "Histgram and Density Plot",
+        description = "Create combined histogram and density plots to visualize data distributions. LLMs provide guidance in customizing and interpreting these plots."
+      ),
+      list(
+        button = "btnLollipopChart_LLM",
+        script = "btnLollipopChart_LLM.R",
+        img = "LollipopChart_LLM.png",
+        title = "Lollipop Chart",
+        description = "Create lollipop charts for visualizing data comparisons. LLMs simplify the process, ensuring clear and effective data representation."
+      ),
+      list(
+        button = "btnMarginalPlot_LLM",
+        script = "btnMarginalPlot_LLM.R",
+        img = "MarginalPlot_LLM.png",
+        title = "Marginal Histogram/Boxplot",
+        description = "Generate marginal histogram or boxplots to visualize data distributions alongside scatterplots. LLMs provide assistance in creating detailed visualizations."
+      ),
+      list(
+        button = "btnNightingalePlot_LLM",
+        script = "btnNightingalePlot_LLM.R",
+        img = "NightingalePlot_LLM.png",
+        title = "Nightingale Rose Diagram",
+        description = "Create Nightingale Rose Diagrams to visualize circular data distributions. LLMs simplify the process, ensuring accurate and visually appealing plots."
+      ),
+      list(
+        button = "btnPairPointPlot_LLM",
+        script = "btnPairPointPlot_LLM.R",
+        img = "PairPointPlot_LLM.png",
+        title = "Pair Point Line Plot",
+        description = "Create pair point line plots to visualize paired data relationships. LLMs assist in generating clear and interpretable plots."
+      ),
+      list(
+        button = "btnPiePlot_LLM",
+        script = "btnPiePlot_LLM.R",
+        img = "PiePlot_LLM.png",
+        title = "Pie Plot",
+        description = "Create pie charts to visualize categorical data distributions. LLMs simplify the customization and interpretation of these plots."
+      ),
+      list(
+        button = "btnRadarChart_LLM",
+        script = "btnRadarChart_LLM.R",
+        img = "RadarChart_LLM.png",
+        title = "Radar Chart",
+        description = "Create radar charts to compare multivariate data. LLMs assist in generating informative and visually appealing plots."
+      ),
+      list(
+        button = "btnRainCloud_LLM",
+        script = "btnRainCloud_LLM.R",
+        img = "RainCloud_LLM.png",
+        title = "Rain Cloud Plot",
+        description = "Generate rain cloud plots to visualize data distributions. LLMs guide users in creating combined density and scatter plots."
+      ),
+      list(
+        button = "btnRankPointPlot_LLM",
+        script = "btnRankPointPlot_LLM.R",
+        img = "RankPointPlot_LLM.png",
+        title = "Rank Point Plot",
+        description = "Create rank point plots to highlight data rankings. LLMs simplify the process, ensuring clear and effective visualization."
+      ),
+      list(
+        button = "btnRidgePlot_LLM",
+        script = "btnRidgePlot_LLM.R",
+        img = "RidgePlot_LLM.png",
+        title = "Ridge Plot",
+        description = "Create ridge plots to visualize distributions across multiple categories. LLMs assist in generating aesthetically pleasing and informative plots."
+      ),
+      list(
+        button = "btnROCplot_LLM",
+        script = "btnROCplot_LLM.R",
+        img = "ROCplot_LLM.png",
+        title = "ROC Plot",
+        description = "Generate Receiver Operating Characteristic (ROC) plots to evaluate classification model performance. LLMs provide insights for accurate interpretation."
+      ),
+      list(
+        button = "btnSankeyPlot_LLM",
+        script = "btnSankeyPlot_LLM.R",
+        img = "SankeyPlot_LLM.png",
+        title = "Sankey Chart",
+        description = "Create Sankey charts to visualize data flows and relationships. LLMs simplify the process, ensuring accurate and engaging visualizations."
+      ),
+      list(
+        button = "btnScatterEllipsePlot_LLM",
+        script = "btnScatterEllipsePlot_LLM.R",
+        img = "ScatterEllipsePlot_LLM.png",
+        title = "Scatter Ellipse Plot",
+        description = "Generate scatter plots with ellipses to highlight data groupings. LLMs assist in creating detailed and informative visualizations."
+      ),
+      list(
+        button = "btnSurvivalPlot_LLM",
+        script = "btnSurvivalPlot_LLM.R",
+        img = "SurvivalPlot_LLM.png",
+        title = "Survival analysis",
+        description = "Create survival plots to analyze time-to-event data. LLMs simplify the process, ensuring accurate and clear visualizations."
+      ),
+      list(
+        button = "btnTernaryPlot_LLM",
+        script = "btnTernaryPlot_LLM.R",
+        img = "TernaryPlot_LLM.png",
+        title = "Ternary Plot",
+        description = "Create ternary plots to visualize three-component data. LLMs provide guidance in generating accurate and aesthetically pleasing plots."
+      ),
+      list(
+        button = "btnUpsetPlot_LLM",
+        script = "btnUpsetPlot_LLM.R",
+        img = "UpsetPlot_LLM.png",
+        title = "UpSet Plot",
+        description = "Create UpSet plots to visualize intersections between sets. LLMs simplify the process, ensuring accurate and engaging visualizations."
+      ),
+      list(
+        button = "btnVenn_LLM",
+        script = "btnVenn_LLM.R",
+        img = "Venn_LLM.png",
+        title = "Venn Plot",
+        description = "Generate Venn plots to display overlaps between sets. LLMs assist in creating clear and informative diagrams."
+      ),
+      list(
+        button = "btnViolinplot_LLM",
+        script = "btnViolinplot_LLM.R",
+        img = "Violinplot_LLM.png",
+        title = "Violin Plot",
+        description = "Create violin plots to visualize data distributions. LLMs guide users in generating detailed and interpretable plots."
+      ),
+      list(
+        button = "btnVolcano_LLM",
+        script = "btnVolcano_LLM.R",
+        img = "Volcano_LLM.png",
+        title = "Volcano Plot",
+        description = "Generate volcano plots to identify significant changes in data. LLMs simplify the process, ensuring accurate and visually appealing results."
+      ),
+      list(
+        button = "btnWorldCloud_LLM",
+        script = "btnWorldCloud_LLM.R",
+        img = "WorldCloud_LLM.png",
+        title = "Word Cloud Plot",
+        description = "Create word clouds to visualize text data. LLMs assist in generating aesthetically pleasing and informative visualizations."
+      )
+    )
+
+    output$visualizationgallery <- renderUI({
+      render_wukong_module_gallery(visualization_modules_original)
     })
 
-    observeEvent(input$btnClusterCorNetwork_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnClusterCorNetwork_LLM.R', package='WuKong'))
-    })
+    register_wukong_job_buttons(visualization_modules_original)
+    # ============================================================
+    # WuKongmini configuration
+    # ============================================================
 
-    observeEvent(input$btnContourPlot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnContourPlot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnCorPlot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnCorPlot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnCorrelationNetwork_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnCorrelationNetwork_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnCrossErrorbarplot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnCrossErrorbarplot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnDendrogram_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnDendrogram_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnDivergingBarplot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnDivergingBarplot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnFunnelPlot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnFunnelPlot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnggseqlogo_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnggseqlogo_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnggtreeDendrogram_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnggtreeDendrogram_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnHeatscatter_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnHeatscatter_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnHistgramDensity_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnHistgramDensity_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnLollipopChart_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnLollipopChart_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnMarginalPlot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnMarginalPlot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnNightingalePlot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnNightingalePlot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnPairPointPlot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnPairPointPlot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnPiePlot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnPiePlot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnRadarChart_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnRadarChart_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnRainCloud_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnRainCloud_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnRankPointPlot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnRankPointPlot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnRidgePlot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnRidgePlot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnROCplot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnROCplot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnSankeyPlot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnSankeyPlot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnScatterEllipsePlot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnScatterEllipsePlot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnSurvivalPlot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnSurvivalPlot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnTernaryPlot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnTernaryPlot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnUpsetPlot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnUpsetPlot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnVenn_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnVenn_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnViolinplot_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnViolinplot_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnVolcano_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnVolcano_LLM.R', package='WuKong'))
-    })
-
-    observeEvent(input$btnWorldCloud_LLM, {
-      rstudioapi::jobRunScript(system.file('home/btnWorldCloud_LLM.R', package='WuKong'))
-    })
-    ##one-click
-    # Define classified modules as a named list
     oneclick_module_categories <- list(
       "I. Data Pre-processing" = c(
         "Coefficient of variation",
         "Logarithm with base 2",
         "Missing value imputation",
-        "Normalization"#,
-        #"Two tables merging"
+        "Normalization"
       ),
       "II. Statistical Analysis" = c(
         "Consensus clustering",
@@ -2876,103 +2611,86 @@ server <- shinyServer(
         "SAMR",
         "Student's t-Test",
         "Wilcoxon Rank Sum and Signed Rank Tests",
-        #"Dynamic Network Biomarkers",
-        #"Factor Analysis",
-        #"Grey Relational Analysis",
         "HCA",
         "K-means Clustering",
-        #"Lack of Fit F-test",
-        #"Linear Regression",
-        #"Logistic Regression",
         "Mfuzz",
-        #"Network Degree Matrix",
         "OPLS-DA",
         "PCA",
         "PCoA",
         "PLS-DA",
-        #"Power Analysis",
-        #"Restricted Cubic Spline Analysis",
-        #"Redundancy Analysis",
-        #"Rank Rank Hypergeometric Overlap Analysis",
-        #"Soft independent modelling by class analogy",
-        #"Time Course Data Analysis",
         "t-SNE",
-        "UMAP"#,
-        #"Estimate Tumor Purity"
+        "UMAP"
       ),
       "III. Functional Annotation" = c(
-        #"Cell Type Annotation",
         "GO Enrichment Analysis",
         "KEGG Enrichment Analysis",
         "Gene Set Enrichment Analysis of GO",
-        "Gene Set Enrichment Analysis of KEGG"#,
-        #"Exploring Protein Functions",
+        "Gene Set Enrichment Analysis of KEGG"
       ),
       "IV. Data Visualization" = c(
         "Barplot",
         "Bar and Point Plot",
         "Box and Point Plot",
-        #"Clustering using Correlation Network",
-        #"Contour Plot",
         "Correlation Plot",
-        #"Correlation Network Plot",
-        #"Cross Error Bar Plot",
-        #"Dendrogram",
-        #"Diverging Bar Plot",
-        #"Funnel Plot",
-        #"Protein/DNA Sequence Logo Plot",
-        #"Dendrogram using ggtree Package",
-        #"Colored Scatter Plot",
         "Histgram and Density Plot",
-        #"Lollipop Chart",
-        #"Marginal Histogram/Boxplot",
-        #"Nightingale Rose Diagram",
-        #"Pair Point Line Plot",
-        #"Pie Plot",
-        #"Radar Chart",
         "Rain Cloud Plot",
         "Rank Point Plot",
-        #"Ridge Plot",
         "ROC Plot",
-        #"Sankey Chart",
-        #"Scatter Ellipse Plot",
-        #"Survival Plot",
-        #"Ternary Plot",
-        #"UpSet Plot",
-        #"Venn Plot",
-        #"Violin Plot",
-        "Volcano Plot"#,
-        #"Word Cloud Plot"
+        "Volcano Plot"
       )
     )
-    # Flatten all modules for the orderInput source
+
     all_oneclick_modules <- unlist(oneclick_module_categories, use.names = FALSE)
-    # Assign a color for each category
+
     category_colors <- c(
-      "I. Data Pre-processing" = "#e0f7fa",      # light cyan
-      "II. Statistical Analysis" = "#fff3e0",     # light orange
-      "III. Functional Annotation" = "#e8f5e9",    # light green
-      "IV. Data Visualization" = "#f3e5f5"        # light purple
+      "I. Data Pre-processing" = "#E7F0F2",
+      "II. Statistical Analysis" = "#F3F0E8",
+      "III. Functional Annotation" = "#E9F0EA",
+      "IV. Data Visualization" = "#F2E8E4"
     )
+
+    category_border_colors <- c(
+      "I. Data Pre-processing" = "#1F4E5F",
+      "II. Statistical Analysis" = "#B55245",
+      "III. Functional Annotation" = "#7A9E7E",
+      "IV. Data Visualization" = "#8A6F91"
+    )
+
+    selected_modules <- reactiveVal(character())
+    workflow_description <- reactiveVal("")
+
+    oneclick_step_results <- reactiveVal(list())
+    oneclick_step_titles <- reactiveVal(list())
+    oneclick_step_codes <- reactiveVal(list())
+    oneclick_step_interpretations <- reactiveVal(list())
+    oneclick_report_html <- reactiveVal("")
+    oneclick_refined_code_text <- reactiveVal("")
+    oneclick_summary_text <- reactiveVal("")
+
+    # ============================================================
+    # WuKongmini UI
+    # ============================================================
 
     output$oneclickgallery <- renderUI({
       tags$div(
-        style = "margin-top: 70px;",
-        tags$head(
-          tags$style(HTML("
-        #wellpanelid1, #wellpanelid2 {
-          background-color: #f5f5f5 !important;
-          padding: 15px;
-          border-radius: 4px;
-        }
-        .nav-tabs > li > a {
-          font-weight: bold !important;
-        }
-      "))
+        style = "margin-top:70px;",
+
+        div(
+          class = "wukongmini-title-box",
+          div(
+            class = "wukongmini-title",
+            "WuKongmini: A workflow designer for building custom pipelines"
+          ),
+          div(
+            class = "wukongmini-subtitle",
+            "Select analysis modules, describe your workflow intention, and let an LLM refine executable R code, run each step, interpret results, and package all outputs into a downloadable report."
+          )
         ),
+
         div(
           mainPanel(
-            width=12,
+            width = 12,
+
             tabsetPanel(
               tabPanel(
                 "Step 1: Upload Data",
@@ -2980,211 +2698,467 @@ server <- shinyServer(
                   column(
                     4,
                     wellPanel(
-                      id="wellpanelid1",
-                      tags$div(
-                        style = "background-color: #f5f5f5; padding: 15px; border-radius: 4px;",
-                        h4("I. Upload Data/Example Data"),
+                      id = "wellpanelid1",
+                      class = "warm-card",
+
+                      h4("I. Upload Data/Example Data", class = "warm-section-title"),
+
+                      radioButtons(
+                        "loaddatatype",
+                        label = NULL,
+                        choices = list("A. Upload" = 1, "B. Load example data" = 2),
+                        selected = 1,
+                        inline = TRUE
+                      ),
+
+                      tags$hr(style = "border-color:#D8D2C4;"),
+
+                      conditionalPanel(
+                        condition = "input.loaddatatype==1",
+
                         radioButtons(
-                          "loaddatatype",
-                          label = NULL,
-                          choices = list("A. Upload" = 1, "B. Load example data"=2),
+                          "fileType_Input",
+                          label = h5("Select File Format:"),
+                          choices = list(".xlsx" = 1, ".xls" = 2, ".csv/txt" = 3),
                           selected = 1,
                           inline = TRUE
                         ),
-                        tags$hr(style="border-color: grey80;"),
+
+                        fileInput(
+                          "file1",
+                          h5("Please import your data file:"),
+                          accept = c("text/csv", "text/plain", ".xlsx", ".xls")
+                        ),
+
+                        checkboxInput("header", "Is the first row names?", TRUE),
+                        checkboxInput("firstcol", "Is the first column names?", TRUE),
+
                         conditionalPanel(
-                          condition = "input.loaddatatype==1",
+                          condition = "input.fileType_Input==1",
+                          numericInput("xlsxindex", h5("Which Sheet to read?"), value = 1)
+                        ),
+
+                        conditionalPanel(
+                          condition = "input.fileType_Input==2",
+                          numericInput("xlsxindex", h5("Which Sheet to read?"), value = 1)
+                        ),
+
+                        conditionalPanel(
+                          condition = "input.fileType_Input==3",
                           radioButtons(
-                            "fileType_Input",
-                            label = h5("Select File Format:"),
-                            choices = list(".xlsx" = 1, ".xls"=2, ".csv/txt" = 3),
-                            selected = 1,
-                            inline = TRUE
-                          ),
-                          fileInput('file1', h5('Please import your data file:'),
-                                    accept=c('text/csv','text/plain','.xlsx','.xls')),
-                          checkboxInput('header', 'Is the first row names?', TRUE),
-                          checkboxInput('firstcol', 'Is the first column names?', TRUE),
-                          conditionalPanel(condition = "input.fileType_Input==1",
-                                           numericInput("xlsxindex",h5("Which Sheet to read?"),value = 1)),
-                          conditionalPanel(condition = "input.fileType_Input==2",
-                                           numericInput("xlsxindex",h5("Which Sheet to read?"),value = 1)),
-                          conditionalPanel(condition = "input.fileType_Input==3",
-                                           radioButtons('sep', 'Data Separator (Comma/Semicolon/Tab/Space):',
-                                                        c(Comma=',', Semicolon=';', Tab='\t', BlankSpace=' '),
-                                                        ',')),
-                          tags$hr(style="border-color: grey80;"),
-                          h4("Sample information:"),
-                          textInput("grnums",h5("1. Group and replicate number:"),value = ""),
-                          bsTooltip("grnums",'Type in the group number and replicate number here. Please note, the group number and replicate number are linked with ";", and the replicate number of each group is linked with "-". For example, if you have two groups, each group has three replicates, then you should type in "2;3-3" here. Similarly, if you have 3 groups with 5 replicates in every groups, you should type in "3;5-5-5".',
-                                    placement = "right",options = list(container = "body")),
-                          textInput("grnames",h5("2. Group names:"),value = ""),
-                          bsTooltip("grnames",'Type in the group names of your samples. Please note, the group names are linked with ";". For example, there are two groups, you can type in "Control;Experiment".',
-                                    placement = "right",options = list(container = "body"))
+                            "sep",
+                            "Data Separator (Comma/Semicolon/Tab/Space):",
+                            c(
+                              Comma = ",",
+                              Semicolon = ";",
+                              Tab = "\t",
+                              BlankSpace = " "
+                            ),
+                            ","
+                          )
                         ),
-                        conditionalPanel(
-                          condition = "input.loaddatatype==2",
-                          downloadButton("loaddatadownload1","Download example expression data",
-                                         style="color: #fff; background-color: #6495ED; border-color: #6495ED"),
-                          tags$hr(style="border-color: grey80;"),
-                          h4("Sample information:"),
-                          textInput("examgrnums",h5("1. Group and replicate number:"),value = "2;4-4"),
-                          textInput("examgrnames",h5("2. Group names:"),value = "A;B")
+
+                        tags$hr(style = "border-color:#D8D2C4;"),
+
+                        h4("Sample information:", class = "warm-section-title"),
+
+                        textInput(
+                          "grnums",
+                          h5("1. Group and replicate number:"),
+                          value = ""
                         ),
-                        uiOutput("goortspecies")
-                      )
+
+                        bsTooltip(
+                          "grnums",
+                          'Type group number and replicate number. Example: "2;3-3".',
+                          placement = "right",
+                          options = list(container = "body")
+                        ),
+
+                        textInput(
+                          "grnames",
+                          h5("2. Group names:"),
+                          value = ""
+                        ),
+
+                        bsTooltip(
+                          "grnames",
+                          'Type group names separated by ";". Example: "Control;Experiment".',
+                          placement = "right",
+                          options = list(container = "body")
+                        )
+                      ),
+
+                      conditionalPanel(
+                        condition = "input.loaddatatype==2",
+
+                        downloadButton(
+                          "loaddatadownload1",
+                          "Download example expression data",
+                          class = "nature-download-btn"
+                        ),
+
+                        tags$hr(style = "border-color:#D8D2C4;"),
+
+                        h4("Sample information:", class = "warm-section-title"),
+
+                        textInput(
+                          "examgrnums",
+                          h5("1. Group and replicate number:"),
+                          value = "2;4-4"
+                        ),
+
+                        textInput(
+                          "examgrnames",
+                          h5("2. Group names:"),
+                          value = "A;B"
+                        )
+                      ),
+
+                      uiOutput("goortspecies")
                     )
                   ),
+
                   column(
                     8,
                     wellPanel(
-                      id="wellpanelid2",
-                      tags$div(
-                        style = "background-color: #f5f5f5; padding: 15px; border-radius: 4px;",
-                        h4("II. Display Uploaded Data/Example Data"),
-                        div(style = "overflow-x: auto;overflow-y: auto;", dataTableOutput("rawdata"))
+                      id = "wellpanelid2",
+                      class = "warm-card",
+
+                      h4(
+                        "II. Display Uploaded Data/Example Data",
+                        class = "warm-section-title"
+                      ),
+
+                      div(
+                        style = "overflow-x:auto; overflow-y:auto;",
+                        dataTableOutput("rawdata")
                       )
                     )
                   )
                 )
               ),
-              # UI for Step 2: Select Modules
+
               tabPanel(
                 "Step 2: Select Modules",
-                tags$style(HTML("
-                .step2-scroll-panel {
-      max-height: 750px;
-      overflow-y: auto;
-      padding-right: 16px;
-    }
-    .module-panel {
-      border-radius: 8px;
-      margin-bottom: 18px;
-      padding: 10px 12px 12px 12px;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.07);
-    }
-    .category-header {
-      font-weight: bold;
-      font-size: 17px;
-      margin-bottom: 6px;
-      margin-top: 8px;
-      padding-left: 2px;
-    }
-    .module-btn {
-      margin: 3px 5px 3px 0;
-      min-width: 180px;
-      text-align: left;
-      border-radius: 5px;
-      border: 1px solid #d1d5db;
-      background-color: #fff;
-      transition: background 0.2s, color 0.2s;
-      font-size: 15px;
-    }
-    .module-btn.selected {
-      background-color: #3b82f6 !important;
-      color: #fff !important;
-      font-weight: bold;
-      border: 2px solid #2563eb;
-    }
-    .module-btn:hover {
-      background-color: #f3f4f6;
-      color: #2563eb;
-    }
-    .selected-list-box {
-      min-height: 310px;
-      background: #e0e7ef;
-      border-radius: 8px;
-      padding: 16px 10px 10px 16px;
-      margin-bottom: 10px;
-    }
-  ")),
+
                 div(
                   class = "step2-scroll-panel",
+
                   fluidRow(
                     column(
                       6,
-                      tags$h4("Available Modules"),
-                      helpText("Click a module to select or deselect it. Modules are grouped and colored by their function."),
-                      # For each category, render a colored panel with modules as buttons
+
+                      tags$h4("Available Modules", class = "warm-section-title"),
+
+                      helpText(
+                        "Click a module to select or deselect it. Modules are grouped and colored by function."
+                      ),
+
                       lapply(names(oneclick_module_categories), function(cat) {
-                        # Assign a specific min-height based on item count
-                        item_count <- length(oneclick_module_categories[[cat]])
-                        # Heuristic: 44px per button + 16px padding
-                        min_height <- paste0(16 + 10 * item_count, "px")
                         div(
                           class = "module-panel",
-                          style = sprintf("background-color:%s; border-left: 8px solid %s;",
-                                          category_colors[cat], category_colors[cat]),
+                          style = sprintf(
+                            "background-color:%s; border-left:8px solid %s;",
+                            category_colors[cat],
+                            category_border_colors[cat]
+                          ),
+
                           div(class = "category-header", cat),
+
                           div(
-                            id = paste0("module_list_", gsub(" ", "_", tolower(cat))),
+                            id = paste0(
+                              "module_list_",
+                              gsub(" ", "_", tolower(cat))
+                            ),
                             class = "module-list-box",
-                            style = sprintf("min-height:%s;", min_height),
-                            uiOutput(paste0("module_btns_", gsub(" ", "_", tolower(cat))))
+                            uiOutput(
+                              paste0(
+                                "module_btns_",
+                                gsub(" ", "_", tolower(cat))
+                              )
+                            )
                           )
                         )
                       })
                     ),
+
                     column(
                       6,
-                      tags$h4("Your Workflow (Selected Modules, in order)"),
+
+                      tags$h4(
+                        "Your Workflow (Selected Modules, in order)",
+                        class = "warm-section-title"
+                      ),
+
                       div(
-                        style = "margin-top: 10px; margin-bottom: 12px; text-align: left;",
-                        div(
-                          style = "display: flex; gap: 20px; align-items: center; padding: 10px 10px;margin-bottom: 10px;",
-                          actionButton("example_pipeline1", "Example Pipeline 1", class = "btn-primary",width="150px",title = "This pipeline demonstrates a typical proteomics data analysis workflow. It starts with normalization and log2 transformation, followed by missing value imputation. Differential expression analysis is performed using SAMR, and results are visualized with a volcano plot. Only the differentially expressed proteins are used for PCA, HCA, and subsequent GO/KEGG enrichment analyses, providing a focused exploration of significant biological changes."),
-                          actionButton("example_pipeline2", "Example Pipeline 2", class = "btn-primary",width="150px",title = "This workflow follows a similar preprocessing and differential analysis strategy as Pipeline 1 but highlights gene set enrichment approaches. After normalization, log2 transformation, and missing value imputation, SAMR identifies differentially expressed proteins. The pipeline then visualizes results and uses all proteins for Gene Set Enrichment Analysis (GSEA) of both GO and KEGG, offering a broader view of functional enrichment beyond just the significant hits.")
+                        style = "display:flex; gap:20px; align-items:center; padding:10px 10px; margin-bottom:10px;",
+
+                        actionButton(
+                          "example_pipeline1",
+                          "Example Pipeline 1",
+                          class = "btn-primary",
+                          width = "150px",
+                          title = "A typical proteomics data analysis workflow using DEPs for PCA, HCA, GO, and KEGG."
+                        ),
+
+                        actionButton(
+                          "example_pipeline2",
+                          "Example Pipeline 2",
+                          class = "btn-primary",
+                          width = "150px",
+                          title = "A workflow highlighting GSEA using all proteins."
                         )
                       ),
-                      div(class = "selected-list-box",
-                          uiOutput("selected_module_list")
-                      ),
+
                       div(
-                        style = "margin-top: 16px; margin-bottom: 8px;",
-                        textAreaInput(
-                          "workflow_description",
-                          label = "Workflow Description",
-                          value = "",
-                          width = "100%",
-                          height = "290px",
-                          placeholder = "Describe your workflow here. Please click the 'Example Pipeline' button to have a check."
-                        )
+                        class = "selected-list-box",
+                        uiOutput("selected_module_list")
+                      ),
+
+                      textAreaInput(
+                        "workflow_description",
+                        label = "Workflow Description",
+                        value = "",
+                        width = "100%",
+                        height = "290px",
+                        placeholder = "Describe your workflow here. Please click the 'Example Pipeline' button to have a check."
                       )
                     )
                   )
                 )
               ),
+
               tabPanel(
-                "Step 3: LLM-assisted Workflow Designer",
-                tags$h4("Run Workflow"),
-                helpText("Please select a local LLM and click 'Run Workflow' to execute your pipeline. Results will appear below."),
-                div(
-                  style = "display: flex; gap: 20px; align-items: center; margin-bottom: 10px;",
-                  selectInput("llmmodeloneclick", NULL, choices = list_modelsx[[1]], width = "300px"),
-                  actionButton("oneclick_run", "Run Workflow", class = "btn-primary",style = "margin-left: 10px;"),
-                  downloadButton("oneclick_download_results", "Download Results",
-                                 style = "margin-left: 10px;background-color: #3498db;color: white;border: none;padding: 10px 10px;border-radius: 5px;cursor: pointer;font-size: 16px;",
-                                 width = '360px')
+                "Step 3: LLM-assisted WuKongmini",
+
+                tags$h4("Run Workflow", class = "warm-section-title"),
+
+                helpText(
+                  "Please configure the LLM backend and click 'Run Workflow'. Refined code, stepwise outputs, bilingual interpretation, and downloadable reports will appear below."
                 ),
+
+                div(
+                  class = "warm-card",
+                  style = "padding:18px 20px; margin-bottom:16px;",
+
+                  tags$h4("LLM Settings", class = "warm-section-title"),
+
+                  helpText(
+                    "DeepSeek API is shown first. You may switch to Kimi, OpenAI, or local Ollama if preferred."
+                  ),
+
+                  fluidRow(
+                    column(
+                      3,
+                      radioButtons(
+                        "oneclick_llm_backend",
+                        label = NULL,
+                        choices = c(
+                          "DeepSeek API" = "deepseek",
+                          "Kimi / Moonshot API" = "kimi",
+                          "OpenAI / ChatGPT API" = "openai",
+                          "Local Ollama" = "ollama"
+                        ),
+                        selected = "deepseek",
+                        inline = FALSE
+                      )
+                    ),
+
+                    column(
+                      5,
+
+                      conditionalPanel(
+                        condition = "input.oneclick_llm_backend == 'deepseek'",
+
+                        passwordInput(
+                          "deepseek_api_key_oneclick",
+                          label = "DeepSeek API Key:",
+                          value = Sys.getenv("DEEPSEEK_API_KEY"),
+                          width = "100%"
+                        ),
+
+                        selectInput(
+                          "deepseek_model_oneclick",
+                          label = "DeepSeek Model:",
+                          choices = setNames(
+                            get_provider_models("deepseek")$model,
+                            get_provider_models("deepseek")$label
+                          ),
+                          selected = "deepseek-v4-pro",
+                          width = "100%"
+                        ),
+
+                        helpText(
+                          "DeepSeek requests use reasoning_effort='high' and thinking enabled by default."
+                        )
+                      ),
+
+                      conditionalPanel(
+                        condition = "input.oneclick_llm_backend == 'kimi'",
+
+                        passwordInput(
+                          "kimi_api_key_oneclick",
+                          label = "Moonshot / Kimi API Key:",
+                          value = Sys.getenv("MOONSHOT_API_KEY"),
+                          width = "100%"
+                        ),
+
+                        selectInput(
+                          "kimi_model_oneclick",
+                          label = "Kimi Model:",
+                          choices = setNames(
+                            get_provider_models("kimi")$model,
+                            get_provider_models("kimi")$label
+                          ),
+                          selected = "kimi-k3",
+                          width = "100%"
+                        )
+                      ),
+
+                      conditionalPanel(
+                        condition = "input.oneclick_llm_backend == 'openai'",
+
+                        passwordInput(
+                          "openai_api_key_oneclick",
+                          label = "OpenAI API Key:",
+                          value = Sys.getenv("OPENAI_API_KEY"),
+                          width = "100%"
+                        ),
+
+                        selectInput(
+                          "openai_model_oneclick",
+                          label = "OpenAI / ChatGPT Model:",
+                          choices = setNames(
+                            get_provider_models("openai")$model,
+                            get_provider_models("openai")$label
+                          ),
+                          selected = "gpt-5.6-luna",
+                          width = "100%"
+                        ),
+
+                        helpText("OpenAI models are called through the Responses API.")
+                      ),
+
+                      conditionalPanel(
+                        condition = "input.oneclick_llm_backend == 'ollama'",
+
+                        radioButtons(
+                          "oneclick_ollama_model_mode",
+                          label = "Ollama Model Source:",
+                          choices = c(
+                            "Use registered/local model" = "registered",
+                            "Use custom model name" = "custom"
+                          ),
+                          selected = "registered",
+                          inline = TRUE
+                        ),
+
+                        conditionalPanel(
+                          condition = "input.oneclick_llm_backend == 'ollama' && input.oneclick_ollama_model_mode == 'registered'",
+
+                          selectInput(
+                            "llmmodeloneclick",
+                            label = "Registered / Local Ollama Model:",
+                            choices = get_ollama_model_choices(),
+                            selected = get_provider_models("ollama")$model[1],
+                            width = "100%"
+                          )
+                        ),
+
+                        conditionalPanel(
+                          condition = "input.oneclick_llm_backend == 'ollama' && input.oneclick_ollama_model_mode == 'custom'",
+
+                          textInput(
+                            "oneclick_ollama_custom_model",
+                            label = "Custom Ollama Model Name:",
+                            value = "",
+                            placeholder = "Example: qwen2.5:32b, llama3.1:8b, deepseek-r1:70b",
+                            width = "100%"
+                          ),
+
+                          helpText(
+                            "The model name must match a model already available in your local Ollama service. You can check local models with: ollama list"
+                          )
+                        ),
+
+                        helpText(
+                          "For custom Ollama models, WuKongmini uses a safe default context setting unless the model is registered in the internal model registry."
+                        )
+                      )
+                    ),
+
+                    column(
+                      4,
+
+                      numericInput(
+                        "oneclick_temperature",
+                        label = "Temperature:",
+                        value = 0.1,
+                        min = 0,
+                        max = 1,
+                        step = 0.1,
+                        width = "100%"
+                      ),
+
+                      div(
+                        style = "display:flex; gap:12px; margin-top:8px; flex-wrap:wrap;",
+
+                        actionButton(
+                          "oneclick_run",
+                          "Run Workflow",
+                          class = "btn-primary",
+                          style = "width:160px;"
+                        ),
+
+                        actionButton(
+                          "test_ai_connection_oneclick",
+                          "Test AI Connection",
+                          class = "nature-test-btn",
+                          style = "width:180px;"
+                        ),
+
+                        downloadButton(
+                          "oneclick_download_results",
+                          "Download Results",
+                          class = "nature-download-btn",
+                          style = "width:170px;"
+                        )
+                      )
+                    )
+                  )
+                ),
+
                 fluidRow(
                   column(
                     6,
-                    #div(
-                    #  class = "result-container",
-                    #  style = "margin-top:20px; min-height:500px; background:#f8fafc;",
-                    #  tags$h5("Refined Prompts (LLM-generated R code or instructions)"),
-                    #  uiOutput("oneclick_prompts")
-                    #)
-                    h5("Refined Prompts (LLM-generated R code or instructions)"),
-                    uiOutput("oneclick_prompts")
+                    div(
+                      class = "warm-card",
+                      style = "padding:16px; min-height:560px;",
+                      h5(
+                        "Refined Prompts / Optimized R Code",
+                        class = "warm-section-title"
+                      ),
+                      div(
+                        class = "oneclick-scroll-box",
+                        uiOutput("oneclick_prompts")
+                      )
+                    )
                   ),
+
                   column(
                     6,
                     div(
-                      class = "result-container",
-                      style = "margin-top:20px; min-height:500px; background:#f9f9f9;",
-                      tags$h5("Analysis Results"),
-                      uiOutput("oneclick_results")
+                      class = "warm-card",
+                      style = "padding:16px; min-height:560px;",
+                      h5(
+                        "Analysis Results with Bilingual Interpretation",
+                        class = "warm-section-title"
+                      ),
+                      div(
+                        class = "oneclick-scroll-box",
+                        uiOutput("oneclick_results")
+                      )
                     )
                   )
                 )
@@ -3194,64 +3168,207 @@ server <- shinyServer(
         )
       )
     })
-    ##
-    output$goortspecies<-renderUI({
-      goort_spedf<-read.csv("uniprot-species.csv",header = T,stringsAsFactors = F)
-      goort_spedf_paste<-paste(goort_spedf$Organism.ID,goort_spedf$Organism,sep = "-")
-      selectizeInput('speciesx', h5('3. Please choose a species:'), choices =goort_spedf_paste,options = list(maxOptions = 6000))
+
+    # ============================================================
+    # Species selector
+    # ============================================================
+
+    output$goortspecies <- renderUI({
+      if (file.exists("uniprot-species.csv")) {
+        goort_spedf <- read.csv(
+          "uniprot-species.csv",
+          header = TRUE,
+          stringsAsFactors = FALSE
+        )
+
+        goort_spedf_paste <- paste(
+          goort_spedf$Organism.ID,
+          goort_spedf$Organism,
+          sep = "-"
+        )
+
+        selectizeInput(
+          "speciesx",
+          h5("3. Please choose a species:"),
+          choices = goort_spedf_paste,
+          options = list(maxOptions = 6000)
+        )
+      } else {
+        textInput(
+          "speciesx",
+          h5("3. Please input species ID/name:"),
+          value = "9606-Homo sapiens"
+        )
+      }
     })
-    examplepeakdatas<-reactive({
-      library(writexl)
-      dataread<-read.csv("Exampledata1.csv",stringsAsFactors = F,check.names = F,row.names = 1)
-      #dataread<-log2(dataread[1:5,])
-      dataread
+
+    # ============================================================
+    # Data loading
+    # ============================================================
+
+    examplepeakdatas <- reactive({
+      if (file.exists("Exampledata1.csv")) {
+        read.csv(
+          "Exampledata1.csv",
+          stringsAsFactors = FALSE,
+          check.names = FALSE,
+          row.names = 1
+        )
+      } else {
+        data.frame(
+          A1 = rnorm(10, 10, 1),
+          A2 = rnorm(10, 10, 1),
+          A3 = rnorm(10, 10, 1),
+          A4 = rnorm(10, 10, 1),
+          B1 = rnorm(10, 12, 1),
+          B2 = rnorm(10, 12, 1),
+          B3 = rnorm(10, 12, 1),
+          B4 = rnorm(10, 12, 1),
+          row.names = paste0("Prot", 1:10),
+          check.names = FALSE
+        )
+      }
     })
-    output$loaddatadownload1<-downloadHandler(
-      filename = function(){paste("Example_ExpressionData_",usertimenum,".csv",sep="")},
-      content = function(file){
-        write.csv(examplepeakdatas(),file,row.names = T)
+
+    output$loaddatadownload1 <- downloadHandler(
+      filename = function() {
+        paste0(
+          "Example_ExpressionData_",
+          format(Sys.time(), "%Y%m%d_%H%M%S"),
+          ".csv"
+        )
+      },
+      content = function(file) {
+        write.csv(examplepeakdatas(), file, row.names = TRUE)
       }
     )
-    peaksdataout<-reactive({
-      if(input$loaddatatype==1){
+
+    peaksdataout <- reactive({
+      if (input$loaddatatype == 1) {
         files <- input$file1
-        if (is.null(files)){
-          dataread<-data.frame(Description="No data loaded. Please upload your dataset or use the example data.")
-        }else{
-          if (input$fileType_Input == "1"){
-            dataread<-read.xlsx(files$datapath,rowNames=input$firstcol,
-                                colNames = input$header,sheet = input$xlsxindex)
+
+        if (is.null(files)) {
+          data.frame(
+            Description = "No data loaded. Please upload your dataset or use the example data."
+          )
+        } else {
+          if (input$fileType_Input == "1") {
+            read.xlsx(
+              files$datapath,
+              rowNames = input$firstcol,
+              colNames = input$header,
+              sheet = input$xlsxindex
+            )
+          } else if (input$fileType_Input == "2") {
+            rownametf <- if (isTRUE(input$firstcol)) 1 else NULL
+
+            read.xls(
+              files$datapath,
+              sheet = input$xlsxindex,
+              header = input$header,
+              row.names = rownametf,
+              stringsAsFactors = FALSE
+            )
+          } else {
+            rownametf <- if (isTRUE(input$firstcol)) 1 else NULL
+
+            read.csv(
+              files$datapath,
+              header = input$header,
+              row.names = rownametf,
+              sep = input$sep,
+              stringsAsFactors = FALSE,
+              check.names = FALSE
+            )
           }
-          else if(input$fileType_Input == "2"){
-            if(sum(input$firstcol)==1){
-              rownametf<-1
-            }else{
-              rownametf<-NULL
-            }
-            dataread<-read.xls(files$datapath,sheet = input$xlsxindex,header=input$header,
-                               row.names = rownametf, sep=input$sep,stringsAsFactors = F)
-          }
-          else{
-            if(sum(input$firstcol)==1){
-              rownametf<-1
-            }else{
-              rownametf<-NULL
-            }
-            dataread<-read.csv(files$datapath,header=input$header,
-                               row.names = rownametf, sep=input$sep,stringsAsFactors = F)
-          }
-          #colnames(dataread)<-c("IDs","Counts","P.values")
         }
-      }else{
-        dataread<-examplepeakdatas()
+      } else {
+        examplepeakdatas()
       }
-      dataread
     })
-    output$rawdata<-renderDataTable({
-      datatable(peaksdataout(), options = list(pageLength = 10))
+
+    output$rawdata <- renderDataTable({
+      datatable(
+        peaksdataout(),
+        options = list(pageLength = 10, scrollX = TRUE)
+      )
     })
-    ##
-    # Example pipeline modules (in order)
+
+    # ============================================================
+    # WuKongmini module selection
+    # ============================================================
+
+    observe({
+      for (cat in names(oneclick_module_categories)) {
+        local({
+          catname <- cat
+          catid <- gsub(" ", "_", tolower(catname))
+
+          output[[paste0("module_btns_", catid)]] <- renderUI({
+            modules <- oneclick_module_categories[[catname]]
+            sel <- selected_modules()
+
+            div(
+              lapply(modules, function(mod) {
+                btnid <- paste0(
+                  "modbtn_",
+                  gsub("[^a-zA-Z0-9]", "_", mod)
+                )
+
+                actionButton(
+                  btnid,
+                  mod,
+                  class = paste(
+                    "module-btn",
+                    ifelse(mod %in% sel, "selected", "")
+                  ),
+                  style = "margin-bottom:6px;"
+                )
+              })
+            )
+          })
+        })
+      }
+    })
+
+    observe({
+      for (mod in all_oneclick_modules) {
+        local({
+          modname <- mod
+          btnid <- paste0(
+            "modbtn_",
+            gsub("[^a-zA-Z0-9]", "_", modname)
+          )
+
+          observeEvent(input[[btnid]], {
+            sel <- selected_modules()
+
+            if (modname %in% sel) {
+              selected_modules(sel[sel != modname])
+            } else {
+              selected_modules(c(sel, modname))
+            }
+          }, ignoreInit = TRUE)
+        })
+      }
+    })
+
+    output$selected_module_list <- renderUI({
+      sel <- selected_modules()
+
+      if (length(sel) == 0) {
+        tags$em("No modules selected yet.")
+      } else {
+        tags$ol(
+          lapply(sel, function(mod) tags$li(mod))
+        )
+      }
+    })
+
+    observeEvent(input$workflow_description, {
+      workflow_description(input$workflow_description)
+    }, ignoreInit = TRUE)
+
     example_pipeline_modules1 <- c(
       "Normalization",
       "Logarithm with base 2",
@@ -3260,12 +3377,10 @@ server <- shinyServer(
       "Volcano Plot",
       "PCA",
       "HCA",
-      "GO Enrichment Analysis"
-    )#"Exploring Gene/Protein Functions" "KEGG Enrichment Analysis"
-    observeEvent(input$example_pipeline1, {
-      selected_modules(example_pipeline_modules1)
-    })
-    ##
+      "GO Enrichment Analysis",
+      "KEGG Enrichment Analysis"
+    )
+
     example_pipeline_modules2 <- c(
       "Normalization",
       "Logarithm with base 2",
@@ -3276,19 +3391,11 @@ server <- shinyServer(
       "HCA",
       "Gene Set Enrichment Analysis of GO",
       "Gene Set Enrichment Analysis of KEGG"
-    )#"Exploring Gene/Protein Functions"
-    observeEvent(input$example_pipeline2, {
-      selected_modules(example_pipeline_modules2)
-    })
-    # At the top of server function
-    workflow_description <- reactiveVal("")
-    # Keep workflow_description in sync with the text area
-    observeEvent(input$workflow_description, {
-      workflow_description(input$workflow_description)
-    }, ignoreInit = TRUE)
-    # When Example Pipeline is clicked, update modules and description
+    )
+
     observeEvent(input$example_pipeline1, {
       selected_modules(example_pipeline_modules1)
+
       workflow_description(
         "This workflow includes the following steps:
 1. Normalization using the median method for the input data.
@@ -3299,671 +3406,1145 @@ server <- shinyServer(
 6. PCA using ONLY the differentially expressed proteins (Up and Down proteins) identified in Step 5. Do NOT use all proteins.
 7. HCA using ONLY the differentially expressed proteins (Up and Down proteins) identified in Step 5.
 8. GO Enrichment Analysis using ONLY the differentially expressed proteins (Up and Down proteins) identified in Step 5.
-"
-      )#9. KEGG Enrichment Analysis using ONLY the differentially expressed proteins (Up and Down proteins) identified in Step 5.
+9. KEGG Enrichment Analysis using ONLY the differentially expressed proteins (Up and Down proteins) identified in Step 5."
+      )
+
+      updateTextAreaInput(
+        session,
+        "workflow_description",
+        value = workflow_description()
+      )
     })
+
     observeEvent(input$example_pipeline2, {
       selected_modules(example_pipeline_modules2)
+
       workflow_description(
         "This workflow includes the following steps:
-1. Normalization using the Median method for the input data.
+1. Normalization using the median method for the input data.
 2. Log2 transformation.
 3. Imputation of missing values.
 4. SAMR for differential expression analysis.
 5. Visualization of results with a volcano plot.
 6. PCA using ONLY the differentially expressed proteins (Up and Down proteins) identified in Step 5. Do NOT use all proteins.
 7. HCA using ONLY the differentially expressed proteins (Up and Down proteins) identified in Step 5.
-8. Gene Set Enrichment Analysis of GO Enrichment Analysis using the whole proteins identified in Step 4.
-9. Gene Set Enrichment Analysis of KEGG Enrichment Analysis using the whole proteins identified in Step 4."
+8. Gene Set Enrichment Analysis of GO using the whole proteins identified in Step 4.
+9. Gene Set Enrichment Analysis of KEGG using the whole proteins identified in Step 4."
+      )
+
+      updateTextAreaInput(
+        session,
+        "workflow_description",
+        value = workflow_description()
       )
     })
-    # Sync text area input with workflow_description()
-    observe({
-      updateTextAreaInput(session, "workflow_description", value = workflow_description())
-    })
-    # Holds selected modules in order of selection
-    selected_modules <- reactiveVal(character())
-    # Render module buttons for each category
-    observe({
-      for (cat in names(oneclick_module_categories)) {
-        local({
-          catname <- cat
-          catid <- gsub(" ", "_", tolower(catname))
-          output[[paste0("module_btns_", catid)]] <- renderUI({
-            modules <- oneclick_module_categories[[catname]]
-            sel <- selected_modules()
-            div(
-              lapply(modules, function(mod) {
-                btnid <- paste0("modbtn_", gsub("[^a-zA-Z0-9]", "_", mod))
-                actionButton(
-                  btnid, mod,
-                  class = paste("module-btn", ifelse(mod %in% sel, "selected", "")),
-                  style = "margin-bottom:6px;"
-                )
-              })
-            )
-          })
-        })
-      }
-    })
+    # ============================================================
+    # WuKongmini run workflow
+    # ============================================================
 
-    # Listen for clicks on any module button
-    observe({
-      for (mod in all_oneclick_modules) {
-        local({
-          modname <- mod
-          btnid <- paste0("modbtn_", gsub("[^a-zA-Z0-9]", "_", modname))
-          observeEvent(input[[btnid]], {
-            sel <- selected_modules()
-            if (modname %in% sel) {
-              # Deselect (remove)
-              selected_modules(sel[sel != modname])
-            } else {
-              # Select (add to end)
-              selected_modules(c(sel, modname))
-            }
-          }, ignoreInit = TRUE)
-        })
-      }
-    })
-    # Render selected module list (in order)
-    output$selected_module_list <- renderUI({
-      sel <- selected_modules()
-      if (length(sel) == 0) {
-        tags$em("No modules selected yet.")
-      } else {
-        tags$ol(
-          lapply(sel, function(mod) tags$li(mod))
-        )
-      }
-    })
-    #oneclick_results
-    # 3. Show refined prompts in left panel
-    #chat_oneclick <- reactiveVal(list())
-    oneclick_summary_text("")
     observeEvent(input$oneclick_run, {
-      output$oneclick_prompts <- renderUI({
-        if(input$loaddatatype==1){
-          grnames1<-strsplit(input$grnames,";")[[1]]
-          grnum1<-as.numeric(strsplit(input$grnums,";")[[1]][1])
-          grnum2<-as.numeric(strsplit(strsplit(input$grnums,";")[[1]][2],"-")[[1]])
-          grnames<-rep(grnames1,times=grnum2)
-        }else{
-          grnames1<-strsplit(input$examgrnames,";")[[1]]
-          grnum1<-as.numeric(strsplit(input$examgrnums,";")[[1]][1])
-          grnum2<-as.numeric(strsplit(strsplit(input$examgrnums,";")[[1]][2],"-")[[1]])
-          grnames<-rep(grnames1,times=grnum2)
-        }
-        inputdata<<-peaksdataout()
-        llmmodeloneclickx<<-input$llmmodeloneclick
-        speciesx<<-input$speciesx
-        WKfuncslist2<<-WKfuncslist1
-        #
-        # === NEW: Incorporate workflow description ===
-        workflow_desc <- input$workflow_description
-        # If empty, fallback to the reactiveVal (sync with UI)
-        if(is.null(workflow_desc) || workflow_desc == "") {
-          workflow_desc <- workflow_description()
-        }
-        workflow_descx<<-workflow_desc
-        #
-        selx <<- selected_modules()
-        funclistx<-list()
-        if(length(selx)>0 & ncol(inputdata)>1){
-          for(i in 1:length(selx)){
-            funclistx[i]<-WKfuncslist2[selx[i]]
-          }
-          names(funclistx)<-selx
-          explorego2<-which(selx=="Logarithm with base 2")
-          if(length(explorego2)>0){
-            funclistx[[explorego2]]<-"logdata<-log2(inputdata)"
-            names(funclistx)[explorego2]<-"Logarithm with base 2"
-          }
-          funclistx1<-funclistx
-          names(funclistx1)<-paste0("Step ",1:length(names(funclistx)),": ",names(funclistx))
-          # Compose the prompt
-          oneclick_user_message1 <- "
-Act as a senior bioinformatician, based on below STRICT RULES and reference codes, Your task is to refine the reference codes step by step in strict accordance with the requirements outlined in the WORKFLOW DESCRIPTION and output the final refined R codes in a single merged R code block marked with ```R and ```.
+      oneclick_summary_text("")
+      oneclick_step_results(list())
+      oneclick_step_titles(list())
+      oneclick_step_codes(list())
+      oneclick_step_interpretations(list())
+      oneclick_report_html("")
+      oneclick_refined_code_text("")
 
-**STRICT RULES:**
-1. **Input Objects:** You may only use these variables as inputs:
-   - `inputdata`: the primary input data matrix or dataframe
-   - `grnames1`: vector of group names
-   - `grnum1`: total number of groups
-   - `grnum2`: vector with the number of replicates per group
-   - `grnames`: vector of group names, each repeated according to its replicate count
-   - `speciesx`: sample species id or name
-2. **Stepwise Chaining:**
-   - **Each step must clearly specify its input and output object names.**
-   - **Each output object from a step must serve as the input for the next step.**
-   - **No intermediate manual changes are allowed.**
-3. **Code Execution:**
-   - All codes must be executable as a single, ordered script without manual intervention.
-   - All necessary `library()` calls for each step must be included as below REFERENCE CODES (even if repeated).
-   - Do **not** load libraries for basic R functions (e.g., `sweep`, `log2`).
-4. **Logic:**
-   - **Do not change the underlying logic or calculations as below WORKFLOW DESCRIPTION.**
-5. **Output:**
-   - Output only the final, refined R code (no explanations inline with code).
-   - Before the code, provide concise, bullet-point explanations (max 1–2 lines each) for:
-     - `inputdata`
-     - `grnames1`
-     - `grnum1`
-     - `grnum2`
-     - `grnames`
-     - `speciesx`
+      output$oneclick_prompts <- renderUI({
+        aceEditor(
+          outputId = "rcode",
+          value = "WuKongmini is preparing selected module codes and asking the LLM to refine the workflow...\nPlease wait.",
+          mode = "r",
+          theme = "chrome",
+          readOnly = TRUE,
+          height = "620px",
+          fontSize = 14
+        )
+      })
+
+      output$oneclick_results <- renderUI({
+        HTML("<pre>Workflow is running. Results and bilingual interpretations will be displayed here.</pre>")
+      })
+
+      if (input$loaddatatype == 1) {
+        shiny::validate(
+          need(!is.null(input$file1), "Please upload a data file first."),
+          need(nzchar(input$grnames), "Please provide group names."),
+          need(nzchar(input$grnums), "Please provide group and replicate numbers.")
+        )
+
+        grnames1 <- strsplit(input$grnames, ";")[[1]]
+        grnum1 <- as.numeric(strsplit(input$grnums, ";")[[1]][1])
+        grnum2 <- as.numeric(strsplit(strsplit(input$grnums, ";")[[1]][2], "-")[[1]])
+        grnames <- rep(grnames1, times = grnum2)
+      } else {
+        grnames1 <- strsplit(input$examgrnames, ";")[[1]]
+        grnum1 <- as.numeric(strsplit(input$examgrnums, ";")[[1]][1])
+        grnum2 <- as.numeric(strsplit(strsplit(input$examgrnums, ";")[[1]][2], "-")[[1]])
+        grnames <- rep(grnames1, times = grnum2)
+      }
+
+      inputdata <- peaksdataout()
+      speciesx <- input$speciesx
+      WKfuncslist2 <- WKfuncslist1
+      selx <- selected_modules()
+      workflow_desc <- input$workflow_description %||% workflow_description()
+
+      shiny::validate(
+        need(length(selx) > 0, "Please select at least one module in Step 2."),
+        need(!is.null(inputdata) && ncol(inputdata) > 1, "Input data is invalid or empty.")
+      )
+
+      funclistx <- list()
+
+      for (i in seq_along(selx)) {
+        if (!is.null(WKfuncslist2[[selx[i]]])) {
+          funclistx[[i]] <- WKfuncslist2[[selx[i]]]
+        } else {
+          funclistx[[i]] <- paste0(
+            "# Reference code for module '",
+            selx[i],
+            "' was not found in WKfuncslist1.\n",
+            "# Please generate a robust implementation based on the module name and workflow description.\n"
+          )
+        }
+      }
+
+      names(funclistx) <- selx
+
+      log_step <- which(selx == "Logarithm with base 2")
+
+      if (length(log_step) > 0) {
+        funclistx[[log_step]] <- "
+# Input: the output object from the previous preprocessing step, or inputdata if this is the first step.
+# Output: logdata
+logdata <- log2(as.matrix(inputdata))
+logdata[is.infinite(logdata)] <- NA
+logdata <- as.data.frame(logdata, check.names = FALSE)
+logdata
+"
+        names(funclistx)[log_step] <- "Logarithm with base 2"
+      }
+
+      funclistx1 <- funclistx
+      names(funclistx1) <- paste0(
+        "Step ",
+        seq_along(funclistx),
+        ": ",
+        names(funclistx)
+      )
+
+      steps_formatted <- sapply(seq_along(funclistx1), function(i) {
+        step_name <- names(funclistx1)[i]
+        step_code <- funclistx1[[i]]
+        paste0("# ", step_name, "\n", step_code, "\n")
+      })
+
+      oneclick_user_message <- paste0(
+        "Act as a senior bioinformatician and expert R programmer.
+
+Your task is to refine a selected WuKongmini proteomics workflow into a single executable R script.
+
+STRICT RULES:
+1. Input objects:
+   - inputdata: primary expression matrix or data frame.
+   - grnames1: vector of group names.
+   - grnum1: total number of groups.
+   - grnum2: vector of replicate numbers per group.
+   - grnames: sample-level group vector.
+   - speciesx: species id/name selected by user.
+
+2. Stepwise chaining:
+   - Each step must start with a comment exactly like: # Step N: Short Step Name
+   - Each step must clearly define its input object and output object in comments.
+   - Each step must use the previous step's major output as its input unless the workflow description explicitly says otherwise.
+   - Do not use undefined objects.
+   - Do not require manual intervention.
+
+3. Accuracy:
+   - Carefully read every selected module's reference code.
+   - Preserve the original calculation logic from the reference code.
+   - Respect all requirements in WORKFLOW DESCRIPTION.
+   - If the workflow says to use only differentially expressed proteins for PCA/HCA/enrichment, subset accordingly.
+   - If the workflow says to use all proteins for GSEA, do not subset only DEPs.
+
+4. KEGG Enrichment Analysis species handling:
+   - This rule applies ONLY when the selected modules include \"KEGG Enrichment Analysis\".
+   - For all other modules, including GO enrichment modules, keep the original reference-code behavior unless the workflow description explicitly requires otherwise.
+   - The user-facing object speciesx may be a species string such as:
+     * \"9606-Homo sapiens\"
+     * \"10090-Mus musculus\"
+     * \"10116-Rattus norvegicus\"
+     * \"3702-Arabidopsis thaliana\"
+     * \"4932-Saccharomyces cerevisiae\"
+     * \"559292-Saccharomyces cerevisiae\"
+     * or it may already be a KEGG organism code such as \"hsa\".
+   - When generating or refining code for KEGG Enrichment Analysis, do NOT directly pass speciesx in formats such as \"9606-Homo sapiens\" to KEGG functions.
+   - For KEGG Enrichment Analysis, infer a KEGG organism code from speciesx and use that KEGG code in KEGG-related function arguments.
+   - Use a separate local object such as idselect instead of overwriting the original speciesx.
+   - The original speciesx object must remain unchanged.
+   - Common mappings:
+     * \"9606-Homo sapiens\", \"9606\", or \"Homo sapiens\" -> \"hsa\"
+     * \"10090-Mus musculus\", \"10090\", or \"Mus musculus\" -> \"mmu\"
+     * \"10116-Rattus norvegicus\", \"10116\", or \"Rattus norvegicus\" -> \"rno\"
+     * \"7227-Drosophila melanogaster\", \"7227\", or \"Drosophila melanogaster\" -> \"dme\"
+     * \"6239-Caenorhabditis elegans\", \"6239\", or \"Caenorhabditis elegans\" -> \"cel\"
+     * \"7955-Danio rerio\", \"7955\", or \"Danio rerio\" -> \"dre\"
+     * \"9031-Gallus gallus\", \"9031\", or \"Gallus gallus\" -> \"gga\"
+     * \"9823-Sus scrofa\", \"9823\", or \"Sus scrofa\" -> \"ssc\"
+     * \"9913-Bos taurus\", \"9913\", or \"Bos taurus\" -> \"bta\"
+     * \"9615-Canis lupus familiaris\", \"9615\", or \"Canis lupus familiaris\" -> \"cfa\"
+     * \"9544-Macaca mulatta\", \"9544\", or \"Macaca mulatta\" -> \"mcc\"
+     * \"3702-Arabidopsis thaliana\", \"3702\", or \"Arabidopsis thaliana\" -> \"ath\"
+     * \"39947-Oryza sativa Japonica Group\", \"39947\", or \"Oryza sativa\" -> \"osa\"
+     * \"4577-Zea mays\", \"4577\", or \"Zea mays\" -> \"zma\"
+     * \"4932-Saccharomyces cerevisiae\", \"559292-Saccharomyces cerevisiae\", \"4932\", \"559292\", or \"Saccharomyces cerevisiae\" -> \"sce\"
+     * \"511145-Escherichia coli str. K-12 substr. MG1655\", \"511145\", or \"Escherichia coli\" -> \"eco\"
+   - If speciesx is already a valid KEGG organism code, such as \"hsa\", \"mmu\", \"rno\", \"dme\", \"cel\", \"dre\", \"gga\", \"ssc\", \"bta\", \"cfa\", \"mcc\", \"ath\", \"osa\", \"zma\", \"sce\", or \"eco\", use it unchanged as idselect.
+   - If the KEGG organism code cannot be inferred, stop with a clear error message that includes the original speciesx value.
+   - Do not modify GO enrichment species handling in this rule.
+
+5. Robustness:
+   - Include required library calls.
+   - Important: because WuKongmini may execute each step independently, include the package-loading statements needed by each step either in the global preamble and, when necessary, also inside the corresponding step.
+   - Prefer suppressPackageStartupMessages(library(packageName)) for package loading.
+   - Use safe object names.
+   - Check and handle missing values where appropriate.
+   - Return a meaningful object at the end of each step so Shiny can display it.
+   - For plots, ensure the ggplot/pheatmap/plot object is returned.
+   - For tables, ensure a data.frame or matrix is returned.
+
+6. Output format:
+   - First provide concise bullet explanations for:
+     inputdata, grnames1, grnum1, grnum2, grnames, speciesx.
+   - Then provide only one complete R code block.
+   - The code block must contain all workflow steps.
+   - Do not include non-R text inside the code block except R comments.
 
 WORKFLOW DESCRIPTION:
-"
-          # Add workflow description if present
-          if(!is.null(workflow_desc) && nchar(trimws(workflow_desc)) > 0){
-            oneclick_user_message1 <- paste0(oneclick_user_message1, workflow_desc, "\n\n")
-          } else {
-            oneclick_user_message1 <- paste0(oneclick_user_message1, "[No workflow description provided]\n\n")
-          }
-          oneclick_user_message1xx <<- paste0(oneclick_user_message1, "OUTPUT FORMAT:\n# Step 1: [Short Step Name]\n[refined R code]\n# Step 2: [Short Step Name]\n[refined R code]\n...\n\nREFERENCE CODES:\n")
+",
+        workflow_desc %||% "[No workflow description provided]",
+        "
 
-          # Dynamically combine all steps from funclistx1
-          steps_formatted <- sapply(seq_along(funclistx1), function(i) {
-            step_name <- names(funclistx1)[i]
-            step_code <- funclistx1[[i]]
-            paste0("# ", step_name, "\n", step_code, "\n")
-          })
-          oneclick_user_message2 <<- paste0(
-            oneclick_user_message1xx, "\n\n",
-            paste(steps_formatted, collapse = "\n")
-          )
-          #chat_oneclick(c(chat_oneclick(), list(list(role = "user", content = oneclick_user_message2))))
-          oneclick_messagesx <<- list(list(role = "user", content = oneclick_user_message2))#chat_oneclick()
-          oneclick_response_message <<- chat(llmmodeloneclickx, oneclick_messagesx, output = "text",
-                                             keep_alive = "0m",temperature = 0, num_predict = 16384,
-                                             num_ctx = 8192,stream=TRUE)
-          aceEditor(outputId = "rcode",value = oneclick_response_message,mode = "r",theme = "chrome",
-                    readOnly = TRUE,height = "500px",fontSize = 14)
-        }else{
-          oneclick_response_message<<-""
-          #HTML(paste("<pre> Please upload data in Step 1: Upload Data or select one module at least in Step 2: Select Modules!</pre>"))
-          aceEditor(outputId = "rcode",value = "Warning: Please upload data in <Step 1: Upload Data> or \nselect one module at least in <Step 2: Select Modules>!",
-                    mode = "r",theme = "chrome",
-                    readOnly = TRUE,height = "500px",fontSize = 14)
-        }
-      })
-      #
-      oneclick_step_results <- reactiveVal(list())
-      oneclick_step_titles <- reactiveVal(list())
-      output$oneclick_results <- renderUI({
-        if (input$loaddatatype == 1) {
-          grnames1 <- strsplit(input$grnames, ";")[[1]]
-          grnum1 <- as.numeric(strsplit(input$grnums, ";")[[1]][1])
-          grnum2 <- as.numeric(strsplit(strsplit(input$grnums, ";")[[1]][2], "-")[[1]])
-          grnames <- rep(grnames1, times = grnum2)
-        } else {
-          grnames1 <- strsplit(input$examgrnames, ";")[[1]]
-          grnum1 <- as.numeric(strsplit(input$examgrnums, ";")[[1]][1])
-          grnum2 <- as.numeric(strsplit(strsplit(input$examgrnums, ";")[[1]][2], "-")[[1]])
-          grnames <- rep(grnames1, times = grnum2)
-        }
-        grnames1 <<- grnames1
-        grnum1 <<- grnum1
-        grnum2 <<- grnum2
-        grnames <<- grnames
-        inputdata <<- peaksdataout()
-        speciesx <<- input$speciesx
+SELECTED MODULES:
+",
+        paste(seq_along(selx), selx, sep = ". ", collapse = "\n"),
+        "
 
-        if (oneclick_response_message != "") {
-          matches1 <- regexpr("```(R|r)(.*?)```", oneclick_response_message)
-          extracted <- regmatches(oneclick_response_message, matches1)
-          r_code <- gsub("```", "", gsub("^```(R|r)", "", extracted))
-          code_text <- trimws(r_code)
-
-          # Parse code into steps by '# Step n:' comments
-          step_locs <- gregexpr("# Step [0-9]+:", code_text)[[1]]
-          n_steps <- length(step_locs)
-          if (n_steps == 1 && step_locs[1] == -1) {
-            step_locs <- 1
-            n_steps <- 1
-          }
-          step_splits <- character(n_steps)
-          for (i in seq_along(step_locs)) {
-            start_pos <- step_locs[i]
-            end_pos <- if (i < n_steps) step_locs[i + 1] - 1 else nchar(code_text)
-            step_splits[i] <- substr(code_text, start_pos, end_pos)
-          }
-          step_splitsx <<- step_splits
-          results_ui <- list()
-          envx <- new.env(parent = globalenv())
-          # Pre-populate required objects
-          envx$inputdata <- inputdata
-          envx$grnames1 <- grnames1
-          envx$grnum1 <- grnum1
-          envx$grnum2 <- grnum2
-          envx$grnames <- grnames
-          envx$speciesx <- speciesx
-          step_results <- list()
-          step_titles <- list()
-          step_prints <- list() # for LLM summary
-
-          for (i in seq_along(step_splits)) {
-            step_code <- step_splits[i]
-            step_code1 <- unlist(strsplit(step_code, "\n"))
-            step_title <- grep("^# Step [0-9]+:", step_code1, value = TRUE)
-            lines_no_step <- step_code1[!grepl("^# Step [0-9]+:", step_code1)]
-            code_body <- paste(lines_no_step, collapse = "\n")
-
-            local({
-              my_i <- i
-              my_title <- if (length(step_title) > 0) step_title else paste("Step", my_i)
-              my_code <- code_body
-
-              result <- tryCatch({
-                eval(parse(text = my_code), envir = envx)
-              }, error = function(e) {
-                structure(list(error = TRUE, message = e$message), class = "oneclick_error")
-              })
-              step_results[[i]] <<- result
-              step_titles[[i]] <<- my_title
-
-              # Dynamically allocate output IDs for UI
-              outputId_plot <- paste0("oneclick_plot_", my_i)
-              outputId_table <- paste0("oneclick_table_", my_i)
-              outputId_text <- paste0("oneclick_text_", my_i)
-
-              if (inherits(result, "ggplot") | inherits(result, "pheatmap")) {
-                output[[outputId_plot]] <- renderPlot({ result })
-                results_ui[[my_i]] <<- tagList(
-                  tags$h5(my_title),
-                  plotOutput(outputId_plot, height = "400px")
-                )
-              } else if (is.data.frame(result) || is.matrix(result)) {
-                output[[outputId_table]] <- renderDataTable({
-                  datatable(result, options = list(pageLength = 5, scrollX = TRUE))
-                })
-                results_ui[[my_i]] <<- tagList(
-                  tags$h5(my_title),
-                  dataTableOutput(outputId_table)
-                )
-              } else if (inherits(result, "oneclick_error")) {
-                results_ui[[my_i]] <<- tagList(
-                  tags$h5(my_title),
-                  tags$pre(style = "color:red;", paste("Error:", result$message))
-                )
-              } else if (!is.null(result)) {
-                output[[outputId_text]] <- renderUI({
-                  tags$pre(capture.output(print(result)))
-                })
-                results_ui[[my_i]] <<- tagList(
-                  tags$h5(my_title),
-                  uiOutput(outputId_text)
-                )
-              }
-            }) # end local
-          }
-          envxx <<- envx
-          oneclick_step_results(step_results)
-          oneclick_step_titles(step_titles)
-          step_prints<<-step_prints
-
-          step_resultsxx<<-oneclick_step_results()
-          step_titlesxx<<-oneclick_step_titles()
-          step_resnames<-unlist(step_titlesxx)
-          step_resnames1<-grep("Limma|SAMR|t-test|Wilcoxon",step_resnames,ignore.case = T)
-          if (length(step_resnames1)>0) {
-            resultdep<<-step_resultsxx[[step_resnames1]]
-            resultx1<-resultdep[abs(resultdep$Fold.Change)>log2(1.5) & resultdep$p.adjust<0.05,]
-            dep_prints <<- paste(rownames(resultx1), collapse = ", ")
-          }else{
-            dep_prints<<-""
-          }
-
-          # ====== LLM DETAILED STEP-BY-STEP SUMMARY GENERATION ======
-          if (is.null(oneclick_summary_text()) || nchar(oneclick_summary_text()) < 50) {
-            # Compose LLM prompt that asks for a scientific, step-by-step interpretation
-            llmmodeloneclickx <- input$llmmodeloneclick
-            summary_prompt1 <- paste0(
-              "You are a senior bioinformatician. The following is an R code-based step-by-step proteomics analysis, including all code, comments, and outputs.\n\n",
-              "Your tasks are:\n",
-              "1. Write a clear, detailed, and scientifically rigorous summary (300–500 words) for the Results section of a research paper. This summary should:\n",
-              "   - Clearly describe the overall analysis workflow, step by step, based on the comments and outputs (do NOT repeat or paraphrase the code itself).\n",
-              "   - For each step, interpret the main statistical and biological findings, focusing on their significance and implications.\n",
-              "2. Ensure your summary is fluent, logical, and stepwise, reflecting the analysis progression.\n",
-              "3. Structure your output with clear headings for each major section (e.g., 'Step-by-step Workflow Summary').\n",
-              "Step-by-step analysis:\n\n",
-              oneclick_response_message
-            )
-            summary_response1 <- chat(
-              llmmodeloneclickx,
-              list(list(role = "user", content = summary_prompt1)),
-              output = "text",
-              keep_alive = "0m",
-              temperature = 0.2,
-              num_ctx = 16384,
-              num_predict = 8192,
-              stream = TRUE
-            )
-            #
-            # Function to check if string is UniProt ID format
-            is_uniprot_id <- function(id) {
-              grepl("^[OPQ][0-9][A-Z0-9]{3}[0-9]$|^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$", id)
-            }
-
-            if(dep_prints!=""){
-              # Split dep_prints into vector
-              dep_vector <- unlist(strsplit(dep_prints, ",\\s+"))
-              # Check if majority are UniProt IDs
-              is_id_flags <- sapply(dep_vector, is_uniprot_id)
-              if (mean(is_id_flags) > 0.5) {
-                # They're likely UniProt IDs – ask LLM to translate to protein names and classify
-                #list_for_llm <- paste(dep_vector, collapse = ", ")
-                library(UniProt.ws)
-                speciesx1<-as.numeric(strsplit(speciesx,"-")[[1]][1])
-                speciesx2<-UniProt.ws(taxId=speciesx1)
-                list_for_llm1 <- select(x = speciesx2,keys = dep_vector,to = "Gene_Name")
-                list_for_llm <- paste(list_for_llm1[[2]], collapse = ", ")
-                dep_input <- list_for_llm
-              } else {
-                # They are likely protein names – use as-is
-                dep_input <- paste(dep_vector, collapse = ", ")
-              }
-              # Construct full LLM prompt
-              summary_prompt2 <- paste0(
-                "You are given a list of differentially expressed proteins (gene names) identified from statistical analyses (e.g., SAMR, Limma, t-test, Wilcoxon).\n",
-                "Your tasks are:\n",
-                "1. Assign each gene name to a biological function category (e.g., Signaling, Metabolism, Immune Response, Structural Proteins, Transporters, etc.).\n",
-                "2. For each functional category, select up to the top 10 core gene names that are most representative or central to that category. If fewer than 10 genes fit, list all available.\n",
-                "3. Present your results in a markdown table with columns:\n",
-                "   - Functional Category\n",
-                "   - Top 10 Core Gene Names\n",
-                "   - Biological Role & Potential Implications\n",
-                "4. If a gene cannot be confidently assigned to a category, place it in 'Unknown/Other'.\n",
-                "5. After the table, provide a brief interpretation for each functional category, explaining the biological significance of the observed changes in these genes.\n\n",
-                "Here is the list of differentially expressed proteins (DEPs):\n",
-                dep_input, "\n"
-              )
-              summary_response2 <- chat(
-                llmmodeloneclickx,
-                list(list(role = "user", content = summary_prompt2)),
-                output = "text",
-                keep_alive = "0m",
-                temperature = 0.2,
-                num_ctx = 16384,
-                num_predict = 8192,
-                stream = TRUE
-              )
-              summary_response<-paste0(summary_response1,"\n",summary_response2)
-            }else{
-              summary_response<-summary_response1
-            }
-            oneclick_summary_text(summary_response)
-          } else {
-            summary_response <- oneclick_summary_text()
-          }
-
-          summary_responsex<<-summary_response
-          # Convert markdown summary to HTML
-          summary_html <- HTML(
-            commonmark::markdown_html(summary_response, hardbreaks = TRUE)
-          )
-
-          summary_ui <- tags$div(
-            style = "background: #f8fafc; border-radius: 10px; margin-top: 24px; padding: 24px 32px; box-shadow: 0 4px 16px rgba(0,0,0,0.08);",
-            tags$h4("LLM-Generated Scientific Summary", style = "color:#2563eb; margin-bottom: 18px;font-size: 30px;font-weight: bold;"),
-            tags$div(
-              summary_html,
-              style = "
-      font-size: 16px;
-      color: #374151;
-      margin-bottom: 0;
-      white-space: normal;
-    "
-            ),
-            tags$style(HTML("
-    /* Style markdown tables */
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-bottom: 20px;
-      background: #fff;
-      border-radius: 6px;
-      overflow: hidden;
-      box-shadow: 0 1px 2px rgba(0,0,0,0.03);
-    }
-    th, td {
-      border: 1px solid #e5e7eb;
-      padding: 10px 12px;
-      text-align: left;
-      vertical-align: top;
-      font-size: 15px;
-    }
-    th {
-      background: #eff6ff;
-      color: #2563eb;
-      font-weight: 600;
-    }
-    tr:nth-child(even) td {
-      background: #f1f5f9;
-    }
-    /* Style headings */
-    h2, h3, h4 {
-      color: #2563eb;
-      margin-top: 18px;
-      margin-bottom: 10px;
-    }
-    /* Style lists */
-    ul, ol {
-      margin-left: 18px;
-      margin-bottom: 12px;
-    }
-  "))
-          )
-
-          do.call(tagList, c(list(summary_ui),results_ui))
-        } else {
-          HTML("<pre> There is nothing here. Please upload data in Step 1: Upload Data or select at least one module in Step 2: Select Modules!</pre>")
-        }
-      })
-
-      output$oneclick_download_results <- downloadHandler(
-        filename = function() {
-          paste0("WuKong_OneClick_Results_", Sys.Date(), ".zip")
-        },
-        content = function(file) {
-          tmpdir <- tempdir()
-          oldwd <- setwd(tmpdir)    # 切换到临时目录
-          on.exit(setwd(oldwd))     # 保证后续切回原目录
-
-          results <- oneclick_step_results()
-          titles <- oneclick_step_titles()
-          resultsx<<-results
-          titlesx<<-titles
-          file_list <- c()
-          if (length(results) != 0) {
-            for (i in seq_along(results)) {
-              res <- results[[i]]
-              # 文件名仅用字母数字下划线
-              title <- gsub("[^a-zA-Z0-9]", "_", titles[[i]])
-              if (is.data.frame(res) || is.matrix(res)) {
-                fname <- paste0("Step", i, "_", title, ".csv")
-                write.csv(res, fname, row.names = TRUE)
-                file_list <- c(file_list, fname)
-              } else if (inherits(res, "ggplot") || inherits(res, "pheatmap") || inherits(res, "recordedplot")) {
-                fname <- paste0("Step", i, "_", title, ".pdf")
-                pdf(fname, width = 8, height = 6)
-                print(res)
-                dev.off()
-                file_list <- c(file_list, fname)
-              } else if (is.character(res) || is.numeric(res) || is.logical(res) || is.list(res)) {
-                fname <- paste0("Step", i, "_", title, ".txt")
-                capture.output(print(res), file = fname)
-                file_list <- c(file_list, fname)
-              } else if (inherits(res, "oneclick_error")) {
-                fname <- paste0("Step", i, "_", title, "_error.txt")
-                writeLines(paste("Error:", res$message), fname)
-                file_list <- c(file_list, fname)
-              }
-            }
-          } else {
-            notefile <- "README.txt"
-            writeLines("No results found. Please run the workflow first.", notefile)
-            file_list <- c(file_list, notefile)
-          }
-          # 只用文件名，不用全路径
-          zip::zip(zipfile = file, files = file_list)
-        }
+REFERENCE CODES:
+",
+        paste(steps_formatted, collapse = "\n\n")
       )
 
+      oneclick_user_messagexx <<- oneclick_user_message
+      oneclick_messagesx <- list(
+        list(
+          role = "user",
+          content = oneclick_user_message
+        )
+      )
+
+      selected_oneclick_model <- get_selected_model_name(
+        backend = input$oneclick_llm_backend,
+        deepseek_model = input$deepseek_model_oneclick,
+        kimi_model = input$kimi_model_oneclick,
+        openai_model = input$openai_model_oneclick,
+        ollama_model = input$llmmodeloneclick,
+        ollama_model_mode = input$oneclick_ollama_model_mode %||% "registered",
+        ollama_custom_model = input$oneclick_ollama_custom_model %||% ""
+      )
+
+      selected_oneclick_max_ctx <- get_model_max_context(
+        input$oneclick_llm_backend,
+        selected_oneclick_model
+      )
+
+      selected_oneclick_num_predict <- get_model_default_num_predict(
+        input$oneclick_llm_backend,
+        selected_oneclick_model
+      )
+
+      oneclick_response_message <- tryCatch({
+        call_llm(
+          backend = input$oneclick_llm_backend,
+          messages = oneclick_messagesx,
+          deepseek_api_key = input$deepseek_api_key_oneclick,
+          deepseek_model = input$deepseek_model_oneclick,
+          kimi_api_key = input$kimi_api_key_oneclick,
+          kimi_model = input$kimi_model_oneclick,
+          openai_api_key = input$openai_api_key_oneclick,
+          openai_model = input$openai_model_oneclick,
+          ollama_model = selected_oneclick_model,
+          temperature = input$oneclick_temperature,
+          num_predict = selected_oneclick_num_predict,
+          num_ctx = selected_oneclick_max_ctx,
+          reasoning_effort = "high",
+          thinking_enabled = TRUE
+        )
+      }, error = function(e) {
+        paste0("LLM 调用失败：", e$message)
+      })
+
+      oneclick_response_messagex <<- oneclick_response_message
+
+      refined_code <- extract_r_code(oneclick_response_message)
+      oneclick_refined_code_text(refined_code)
+
+      output$oneclick_prompts <- renderUI({
+        aceEditor(
+          outputId = "rcode",
+          value = oneclick_response_message,
+          mode = "r",
+          theme = "chrome",
+          readOnly = TRUE,
+          height = "620px",
+          fontSize = 14
+        )
+      })
+
+      code_text <- refined_code
+      code_textx <<- code_text
+
+      if (!nzchar(code_text) || grepl("^LLM 调用失败", code_text)) {
+        output$oneclick_results <- renderUI({
+          tags$pre(style = "color:red;", code_text)
+        })
+        return(NULL)
+      }
+
+      # ============================================================
+      # Split refined R code into preamble and stepwise executable blocks
+      # ============================================================
+      # Important optimization:
+      # The LLM often places library() / require() calls at the top of the script,
+      # before '# Step 1:'. If we only split from '# Step 1:', those package-loading
+      # statements will be discarded, causing errors such as:
+      # 'could not find function impute.knn'.
+      #
+      # Therefore, we extract the code before the first '# Step N:' as preamble_code,
+      # execute it once in envx, and also prepend it to each step execution.
+      # This makes every step robust when executed independently.
+
+      step_locs <- gregexpr("# Step [0-9]+:", code_text, perl = TRUE)[[1]]
+
+      preamble_code <- ""
+
+      if (length(step_locs) == 1 && step_locs[1] == -1) {
+        step_locs <- 1
+        n_steps <- 1
+        step_splits <- code_text
+      } else {
+        if (step_locs[1] > 1) {
+          preamble_code <- substr(code_text, 1, step_locs[1] - 1)
+        }
+
+        n_steps <- length(step_locs)
+        step_splits <- character(n_steps)
+
+        for (i in seq_along(step_locs)) {
+          start_pos <- step_locs[i]
+          end_pos <- if (i < n_steps) {
+            step_locs[i + 1] - 1
+          } else {
+            nchar(code_text)
+          }
+
+          step_splits[i] <- substr(code_text, start_pos, end_pos)
+        }
+      }
+
+      step_locsx <<- step_locs
+      step_splitsx <<- step_splits
+      preamble_codex <<- preamble_code
+
+      # ============================================================
+      # Create execution environment
+      # ============================================================
+
+      envx <- new.env(parent = globalenv())
+
+      envx$inputdata <- inputdata
+      envx$grnames1 <- grnames1
+      envx$grnum1 <- grnum1
+      envx$grnum2 <- grnum2
+      envx$grnames <- grnames
+      envx$speciesx <- speciesx
+
+      envx$WKfuncslist1 <- WKfuncslist1
+      envx$selected_modules <- selx
+      envx$workflow_description <- workflow_desc
+
+      # ============================================================
+      # Execute preamble code once before stepwise execution
+      # ============================================================
+
+      preamble_result <- NULL
+      preamble_error <- NULL
+
+      if (nzchar(trimws(preamble_code))) {
+        preamble_result <- tryCatch({
+          eval(parse(text = preamble_code), envir = envx)
+        }, error = function(e) {
+          preamble_error <<- e$message
+          NULL
+        })
+      }
+
+      step_results <- list()
+      step_titles <- list()
+      step_codes <- list()
+      results_ui <- list()
+      result_summaries_for_llm <- list()
+
+      if (!is.null(preamble_error)) {
+        result_summaries_for_llm[[length(result_summaries_for_llm) + 1]] <- paste0(
+          "Preamble execution warning/error:\n",
+          preamble_error,
+          "\n\n",
+          "This may affect downstream steps if required packages or helper functions were not loaded."
+        )
+      }
+
+      # ============================================================
+      # Execute each workflow step
+      # ============================================================
+
+      for (i in seq_along(step_splits)) {
+        step_code <- step_splits[i]
+        step_code_lines <- unlist(strsplit(step_code, "\n"))
+
+        step_title <- grep("^# Step [0-9]+:", step_code_lines, value = TRUE)
+        step_title <- if (length(step_title) > 0) {
+          step_title[1]
+        } else {
+          paste("Step", i)
+        }
+
+        lines_no_step <- step_code_lines[
+          !grepl("^# Step [0-9]+:", step_code_lines)
+        ]
+
+        code_body <- paste(lines_no_step, collapse = "\n")
+
+        executable_step_code <- paste(
+          preamble_code,
+          "\n\n",
+          code_body,
+          sep = ""
+        )
+
+        result <- tryCatch({
+          eval(parse(text = executable_step_code), envir = envx)
+        }, error = function(e) {
+          structure(
+            list(
+              error = TRUE,
+              message = e$message,
+              step_title = step_title,
+              step_code = step_code,
+              executable_step_code = executable_step_code
+            ),
+            class = "oneclick_error"
+          )
+        })
+
+        step_results[[i]] <- result
+        step_titles[[i]] <- step_title
+        step_codes[[i]] <- step_code
+
+        result_summaries_for_llm[[i]] <- paste0(
+          step_title,
+          "\n",
+          summarize_result_object(result)
+        )
+      }
+
+      oneclick_step_results(step_results)
+      oneclick_step_titles(step_titles)
+      oneclick_step_codes(step_codes)
+
+      workflow_descx <<- workflow_desc
+      selxx <<- selx
+      code_textx <<- code_text
+      step_resultsx <<- step_results
+      # ============================================================
+      # Generate bilingual scientific interpretation
+      # ============================================================
+
+      interpretation_prompt <- paste0(
+        "You are a senior multi-omics bioinformatician.
+
+Based on the following WuKongmini workflow, selected modules, workflow description, refined R code, and stepwise outputs, write detailed bilingual interpretations.
+
+Requirements:
+1. For each module/step:
+   - Provide an English explanation.
+   - Provide a Chinese explanation.
+   - Explain what the step does, what the result means, and how it informs downstream analysis.
+2. Be scientifically rigorous and suitable for a Results section.
+3. If a step generated an error, explain the likely reason and how to fix it.
+4. Do not invent numeric findings that are not present in the outputs.
+5. Use clear markdown headings.
+
+Workflow Description:
+",
+        workflow_desc %||% "[No workflow description provided]",
+        "
+
+Selected Modules:
+",
+        paste(seq_along(selx), selx, sep = ". ", collapse = "\n"),
+        "
+
+Refined R Code:
+```r
+",
+        code_text,
+        "
+Stepwise Outputs:
+",
+        paste(unlist(result_summaries_for_llm), collapse = "\n\n---\n\n")
+      )
+      interpretation_promptx <<- interpretation_prompt
+
+      interpretation_response <- tryCatch({
+        call_llm(
+          backend = input$oneclick_llm_backend,
+          messages = list(
+            list(
+              role = "user",
+              content = interpretation_prompt
+            )
+          ),
+          deepseek_api_key = input$deepseek_api_key_oneclick,
+          deepseek_model = input$deepseek_model_oneclick,
+          kimi_api_key = input$kimi_api_key_oneclick,
+          kimi_model = input$kimi_model_oneclick,
+          openai_api_key = input$openai_api_key_oneclick,
+          openai_model = input$openai_model_oneclick,
+          ollama_model = selected_oneclick_model,
+          temperature = 0.2,
+          num_predict = selected_oneclick_num_predict,
+          num_ctx = selected_oneclick_max_ctx,
+          reasoning_effort = "high",
+          thinking_enabled = TRUE
+        )
+      }, error = function(e) {
+        paste0("结果解读生成失败：", e$message)
+      })
+
+      interpretation_responsex <<- interpretation_response
+      oneclick_summary_text(interpretation_response)
+
+      # ============================================================
+      # Render stepwise results
+      # ============================================================
+
+      for (i in seq_along(step_results)) {
+        local({
+          my_i <- i
+          result <- step_results[[my_i]]
+          my_title <- step_titles[[my_i]]
+
+          outputId_plot <- paste0("oneclick_plot_", my_i)
+          outputId_table <- paste0("oneclick_table_", my_i)
+          outputId_text <- paste0("oneclick_text_", my_i)
+
+          if (is_ggplot_object(result)) {
+            output[[outputId_plot]] <- renderPlot({
+              print(result)
+            })
+
+            results_ui[[my_i]] <<- tagList(
+              tags$div(
+                style = "background:#F7F5F0;border-left:5px solid #1F4E5F;border-radius:10px;padding:12px;margin-bottom:18px;",
+                tags$h5(
+                  my_title,
+                  style = "color:#1F4E5F;font-weight:bold;"
+                ),
+                plotOutput(outputId_plot, height = "420px")
+              )
+            )
+          } else if (is_pheatmap_object(result)) {
+            output[[outputId_plot]] <- renderPlot({
+              print(result)
+            })
+
+            results_ui[[my_i]] <<- tagList(
+              tags$div(
+                style = "background:#F7F5F0;border-left:5px solid #1F4E5F;border-radius:10px;padding:12px;margin-bottom:18px;",
+                tags$h5(
+                  my_title,
+                  style = "color:#1F4E5F;font-weight:bold;"
+                ),
+                plotOutput(outputId_plot, height = "420px")
+              )
+            )
+          } else if (is.data.frame(result) || is.matrix(result)) {
+            output[[outputId_table]] <- renderDataTable({
+              datatable(
+                as.data.frame(result),
+                options = list(pageLength = 8, scrollX = TRUE)
+              )
+            })
+
+            results_ui[[my_i]] <<- tagList(
+              tags$div(
+                style = "background:#FFFDF8;border-left:5px solid #B55245;border-radius:10px;padding:12px;margin-bottom:18px;",
+                tags$h5(
+                  my_title,
+                  style = "color:#1F4E5F;font-weight:bold;"
+                ),
+                dataTableOutput(outputId_table)
+              )
+            )
+          } else if (inherits(result, "oneclick_error")) {
+            results_ui[[my_i]] <<- tagList(
+              tags$div(
+                style = "background:#FFF1F0;border-left:5px solid #B55245;border-radius:10px;padding:12px;margin-bottom:18px;",
+                tags$h5(
+                  my_title,
+                  style = "color:#8A1F11;font-weight:bold;"
+                ),
+                tags$pre(
+                  style = "color:#8A1F11;white-space:pre-wrap;",
+                  paste("Error:", result$message)
+                )
+              )
+            )
+          } else {
+            output[[outputId_text]] <- renderUI({
+              tags$pre(
+                paste(
+                  capture.output(print(result)),
+                  collapse = "\n"
+                )
+              )
+            })
+
+            results_ui[[my_i]] <<- tagList(
+              tags$div(
+                style = "background:#FFFDF8;border-left:5px solid #7A9E7E;border-radius:10px;padding:12px;margin-bottom:18px;",
+                tags$h5(
+                  my_title,
+                  style = "color:#1F4E5F;font-weight:bold;"
+                ),
+                uiOutput(outputId_text)
+              )
+            )
+          }
+        })
+      }
+
+      interpretation_html <- HTML(
+        commonmark::markdown_html(
+          interpretation_response,
+          hardbreaks = TRUE
+        )
+      )
+
+      summary_ui <- tags$div(
+        style = "background:#F7F5F0;border-radius:12px;margin-bottom:22px;padding:22px 26px;box-shadow:0 4px 14px rgba(31,78,95,0.12);border:1px solid #D8D2C4;",
+        tags$h4(
+          "LLM-Generated Bilingual Scientific Interpretation",
+          style = "color:#1F4E5F;font-size:26px;font-weight:bold;"
+        ),
+        tags$div(
+          interpretation_html,
+          style = "font-size:15px;color:#374151;line-height:1.7;"
+        )
+      )
+
+      output$oneclick_results <- renderUI({
+        do.call(tagList, c(list(summary_ui), results_ui))
+      })
+
+      # ============================================================
+      # Build HTML report
+      # ============================================================
+
+      report_html <- paste0(
+        "<!DOCTYPE html>
+<html> <head> <meta charset='UTF-8'> <title>WuKongmini Workflow Report</title> <style> body { font-family: Arial, 'Microsoft YaHei', sans-serif; margin: 32px; background: #F7F5F0; color: #374151; } h1 { color: #1F4E5F; border-bottom: 3px solid #1F4E5F; padding-bottom: 10px; } h2, h3 { color: #1F4E5F; } pre { background: #FFFDF8; border: 1px solid #D8D2C4; border-radius: 8px; padding: 14px; overflow-x: auto; white-space: pre-wrap; } table { border-collapse: collapse; width: 100%; margin-bottom: 20px; background: white; } th, td { border: 1px solid #D8D2C4; padding: 8px 10px; } th { background: #E7F0F2; color: #1F4E5F; } .section { background: #FFFDF8; border-radius: 12px; padding: 20px; margin-bottom: 22px; box-shadow: 0 3px 12px rgba(31,78,95,0.12); border: 1px solid #D8D2C4; } </style> </head> <body> <h1>WuKongmini: Workflow Analysis Report</h1> <div class='section'> <h2>Workflow Description</h2> <pre>", htmlEscape(workflow_desc %||% ""), "</pre> </div> <div class='section'> <h2>Selected Modules</h2> <ol>", paste0("<li>", htmlEscape(selx), "</li>", collapse = ""), "</ol> </div> <div class='section'> <h2>Refined R Code</h2> <pre>", htmlEscape(code_text), "</pre> </div> <div class='section'> <h2>Bilingual Scientific Interpretation</h2>", commonmark::markdown_html( interpretation_response, hardbreaks = TRUE ), "</div> <div class='section'> <h2>Stepwise Result Summary</h2> <pre>", htmlEscape( paste( unlist(result_summaries_for_llm), collapse = "\n\n---\n\n" ) ), "</pre> </div> </body> </html>" )
+      oneclick_report_html(report_html)
     })
 
+    # ============================================================
+    # WuKongmini download all results
+    # ============================================================
 
+    output$oneclick_download_results <- downloadHandler(
+      filename = function() {
+        paste0(
+          "WuKongmini_Results_",
+          format(Sys.time(), "%Y%m%d_%H%M%S"),
+          ".zip"
+        )
+      },
 
-    ##
-    #chatConversation
+      content = function(file) {
+        tmpdir <- tempfile("WuKongmini_results_")
+        dir.create(tmpdir, recursive = TRUE, showWarnings = FALSE)
+
+        oldwd <- setwd(tmpdir)
+        on.exit(setwd(oldwd), add = TRUE)
+
+        results <- oneclick_step_results()
+        titles <- oneclick_step_titles()
+        codes <- oneclick_step_codes()
+        interpretation <- oneclick_summary_text()
+        report_html <- oneclick_report_html()
+        refined_code <- oneclick_refined_code_text()
+
+        file_list <- c()
+
+        code_file <- "WuKongmini_refined_R_code.R"
+        writeLines(refined_code %||% "", code_file, useBytes = TRUE)
+        file_list <- c(file_list, code_file)
+
+        interpretation_file <- "WuKongmini_bilingual_interpretation.txt"
+        writeLines(interpretation %||% "", interpretation_file, useBytes = TRUE)
+        file_list <- c(file_list, interpretation_file)
+
+        html_file <- "WuKongmini_Report.html"
+        writeLines(
+          report_html %||%
+            "<html><body><h1>No report available</h1></body></html>",
+          html_file,
+          useBytes = TRUE
+        )
+        file_list <- c(file_list, html_file)
+
+        if (length(results) > 0) {
+          for (i in seq_along(results)) {
+            res <- results[[i]]
+            title <- if (length(titles) >= i) {
+              titles[[i]]
+            } else {
+              paste0("Step_", i)
+            }
+
+            title_clean <- safe_filename(title)
+
+            step_code_file <- paste0(
+              "Step",
+              i,
+              "_",
+              title_clean,
+              "_code.R"
+            )
+
+            writeLines(
+              codes[[i]] %||% "",
+              step_code_file,
+              useBytes = TRUE
+            )
+
+            file_list <- c(file_list, step_code_file)
+
+            if (inherits(res, "oneclick_error")) {
+              fname <- paste0(
+                "Step",
+                i,
+                "_",
+                title_clean,
+                "_error.txt"
+              )
+
+              writeLines(
+                paste("Error:", res$message),
+                fname,
+                useBytes = TRUE
+              )
+
+              file_list <- c(file_list, fname)
+
+            } else if (is.data.frame(res) || is.matrix(res)) {
+              fname <- paste0(
+                "Step",
+                i,
+                "_",
+                title_clean,
+                ".csv"
+              )
+
+              write.csv(
+                as.data.frame(res),
+                fname,
+                row.names = TRUE,
+                fileEncoding = "UTF-8"
+              )
+
+              file_list <- c(file_list, fname)
+
+              txtname <- paste0(
+                "Step",
+                i,
+                "_",
+                title_clean,
+                "_summary.txt"
+              )
+
+              capture.output({
+                cat("Result type: table/data.frame\n")
+                cat(
+                  "Dimensions:",
+                  nrow(as.data.frame(res)),
+                  "x",
+                  ncol(as.data.frame(res)),
+                  "\n\n"
+                )
+                print(utils::head(as.data.frame(res), 20))
+              }, file = txtname)
+
+              file_list <- c(file_list, txtname)
+
+            } else if (is_ggplot_object(res)) {
+              pdfname <- paste0(
+                "Step",
+                i,
+                "_",
+                title_clean,
+                ".pdf"
+              )
+
+              pngname <- paste0(
+                "Step",
+                i,
+                "_",
+                title_clean,
+                "_300dpi.png"
+              )
+
+              ggplot2::ggsave(
+                pdfname,
+                plot = res,
+                width = 8,
+                height = 6,
+                units = "in"
+              )
+
+              ggplot2::ggsave(
+                pngname,
+                plot = res,
+                width = 8,
+                height = 6,
+                units = "in",
+                dpi = 300
+              )
+
+              file_list <- c(file_list, pdfname, pngname)
+
+            } else if (is_pheatmap_object(res)) {
+              pdfname <- paste0(
+                "Step",
+                i,
+                "_",
+                title_clean,
+                ".pdf"
+              )
+
+              pngname <- paste0(
+                "Step",
+                i,
+                "_",
+                title_clean,
+                "_300dpi.png"
+              )
+
+              pdf(pdfname, width = 8, height = 6)
+              print(res)
+              dev.off()
+
+              png(
+                pngname,
+                width = 8,
+                height = 6,
+                units = "in",
+                res = 300
+              )
+
+              print(res)
+              dev.off()
+
+              file_list <- c(file_list, pdfname, pngname)
+
+            } else if (inherits(res, "recordedplot")) {
+              pdfname <- paste0(
+                "Step",
+                i,
+                "_",
+                title_clean,
+                ".pdf"
+              )
+
+              pngname <- paste0(
+                "Step",
+                i,
+                "_",
+                title_clean,
+                "_300dpi.png"
+              )
+
+              pdf(pdfname, width = 8, height = 6)
+              replayPlot(res)
+              dev.off()
+
+              png(
+                pngname,
+                width = 8,
+                height = 6,
+                units = "in",
+                res = 300
+              )
+
+              replayPlot(res)
+              dev.off()
+
+              file_list <- c(file_list, pdfname, pngname)
+
+            } else {
+              fname <- paste0(
+                "Step",
+                i,
+                "_",
+                title_clean,
+                ".txt"
+              )
+
+              capture.output(print(res), file = fname)
+              file_list <- c(file_list, fname)
+            }
+          }
+        } else {
+          notefile <- "README.txt"
+
+          writeLines(
+            "No results found. Please run WuKongmini workflow first.",
+            notefile
+          )
+
+          file_list <- c(file_list, notefile)
+        }
+
+        zip::zip(zipfile = file, files = file_list)
+      }
+    )
+    # ============================================================
+    # Conversation module
+    # ============================================================
+
     observeEvent(input$example_clicked, {
-      updateTextInput(session, "user_input", value = "I want to do PCA analysis and How could I do in this platform?")# Refer to inner codes. and point shapes are circle
+      updateTextAreaInput(
+        session,
+        "user_input",
+        value = "I want to do PCA analysis and How could I do in this platform?"
+      )
     })
-    ######
+
     chat_history <- reactiveVal(list())
     code_result <- reactiveVal(NULL)
-    typetimes<-1
-    observeEvent(input$send,{
-      #if(typetimes==1){
-      #  user_message<-""
-      #  typetimes<<-typetimes+1
-      #}else{
-      #  user_message<-input$user_input
-      #}
-      #wkfuncdf<<-read.xlsx("WKfunctions.xlsx",sheet = 2)
-      #user_messagexx1<<-stringr::str_c(readLines("wkfuncdf.txt"), collapse = "\n")
-      #user_messagexx2<-paste0("Below contents have two columns, separated by '\t', the first one is module name, the other is module description. If users ask 'How to do in this platform' or any similar questions, you must answer based on below contents, otherwise, you can ignore below contents.\n",user_messagexx1)
-      #user_messagexx2<-paste0("Please learn from below contents and if users ask similar questions, answer based on below contents:\n",user_messagexx1)
-      #chat_history(c(chat_history(), list(list(role = "user", content = user_messagexx2))))
-      #user_messagexx3<<-chat_history()
-      #llmmodelx<<-input$llmmodel
-      #response_messagex1 <- chat(llmmodelx, user_messagexx3, output = "text",
-      #                         keep_alive = "0m",temperature = 0.2, num_predict = 2048,
-      #                         stream=TRUE)
-      #chat_history(c(chat_history(), list(list(role = "assistant", content = response_messagex1))))
-      ##
-      user_message<-input$user_input
-      user_messagex <<- user_message
-      chat_history(c(chat_history(), list(list(role = "user", content = user_message))))
-      messagesx <<- chat_history()
-      llmmodelx<<-input$llmmodel
-      response_message <- chat(llmmodelx, messagesx, output = "text",#llama3 llama3.1:405b llama3:70b gemma2:27b
-                               keep_alive = "0m",temperature = 0.2, num_predict = 2048,
-                               stream=TRUE)
-      chat_history(c(chat_history(), list(list(role = "assistant", content = response_message))))
-      # Convert Markdown to HTML
-      convert_to_html <- function(text){
-        markdownToHTML(text = text, fragment.only = TRUE)
+
+    observeEvent(input$send, {
+      user_message <- input$user_input
+
+      if (is.null(user_message) || trimws(user_message) == "") {
+        return(NULL)
       }
-      messagesx1 <<- chat_history()
-      new_chat <- lapply(chat_history(),function(x){
-        if (x$role == "user"){
+
+      chat_history(
+        c(
+          chat_history(),
+          list(
+            list(
+              role = "user",
+              content = user_message
+            )
+          )
+        )
+      )
+
+      messagesx <- chat_history()
+      messagesx_global <<- messagesx
+
+      selected_chat_model <- get_selected_model_name(
+        backend = input$chat_llm_backend,
+        deepseek_model = input$deepseek_model_chat,
+        kimi_model = input$chat_kimi_model,
+        openai_model = input$chat_openai_model,
+        ollama_model = input$llmmodel,
+        ollama_model_mode = input$chat_ollama_model_mode %||% "registered",
+        ollama_custom_model = input$chat_ollama_custom_model %||% ""
+      )
+
+      selected_chat_max_ctx <- get_model_max_context(
+        input$chat_llm_backend,
+        selected_chat_model
+      )
+
+      selected_chat_num_predict <- get_model_default_num_predict(
+        input$chat_llm_backend,
+        selected_chat_model
+      )
+
+      response_message <- tryCatch({
+        call_llm(
+          backend = input$chat_llm_backend,
+          messages = messagesx,
+          deepseek_api_key = input$deepseek_api_key_chat,
+          deepseek_model = input$deepseek_model_chat,
+          kimi_api_key = input$chat_kimi_api_key,
+          kimi_model = input$chat_kimi_model,
+          openai_api_key = input$chat_openai_api_key,
+          openai_model = input$chat_openai_model,
+          ollama_model = selected_chat_model,
+          temperature = 0.2,
+          num_predict = selected_chat_num_predict,
+          num_ctx = selected_chat_max_ctx,
+          reasoning_effort = "high",
+          thinking_enabled = TRUE
+        )
+      }, error = function(e) {
+        paste0("LLM 调用失败：", e$message)
+      })
+
+      response_messagex <<- response_message
+
+      chat_history(
+        c(
+          chat_history(),
+          list(
+            list(
+              role = "assistant",
+              content = response_message
+            )
+          )
+        )
+      )
+
+      convert_to_html <- function(text) {
+        markdownToHTML(
+          text = text,
+          fragment.only = TRUE
+        )
+      }
+
+      new_chat <- lapply(chat_history(), function(x) {
+        if (x$role == "user") {
           paste0(
             '<div class="user"><div class="message"><strong>User:</strong> ',
-            convert_to_html(gsub(" Plaese just copy below codes to give me the R codes and no interpretation:\n\n.*","",x$content)),
+            convert_to_html(x$content),
             '</div></div>'
           )
-        }else{
-          paste0('<div class="assistant"><div class="message"><strong>Assistant:</strong> ', convert_to_html(x$content), '</div></div>')
+        } else {
+          paste0(
+            '<div class="assistant"><div class="message"><strong>Assistant:</strong> ',
+            convert_to_html(x$content),
+            '</div></div>'
+          )
         }
       })
 
-      updateTextInput(session, "user_input", value = "")
+      updateTextAreaInput(session, "user_input", value = "")
+
       output$chat_output <- renderUI({
         HTML(paste(new_chat, collapse = "\n"))
       })
-      # Check for R code and execute
-      response_messagex <<- response_message
-      if (grepl("```R|```r", response_messagex) | grepl("```", response_messagex)) {
-        #r_code <- sub(".*```R|.*\n\n```", "", response_messagex[length(response_messagex)])
-        #r_code <- sub("```\n\n.*|```.*", "", r_code)
-        matches1 <- regexpr("```(R|r)(.*?)```", response_messagex)
-        extracted <- regmatches(response_messagex, matches1)
-        r_code <- gsub("```","",gsub("^```(R|r)", "", extracted))
-        r_code <- trimws(r_code)
+
+      # Automatically detect and execute R code blocks in the assistant response
+      if (grepl("```R|```r|```", response_message)) {
+        r_code <- extract_r_code(response_message)
+        r_codex <<- r_code
+
         result <- tryCatch({
           eval(parse(text = r_code))
         }, error = function(e) {
           paste("Error in code:", e$message)
         })
+
         code_result(result)
       } else {
         code_result(NULL)
       }
 
+      # Keep compatibility with original code_output, if it exists in downstream UI/module
       output$code_output <- renderUI({
-        code_resultx<<-code_result()
-        #if (!is.null(code_result())) {
-        #  if (is.ggplot(code_result())) {
-        #    plotOutput("plot_result")
-        #  } else {
-        #    HTML(paste("<pre>", code_result(), "</pre>"))
-        #  }
-        #} else {
-        #  HTML("")
-        #}
-        if(is.ggplot(code_result())){
+        code_resultx <<- code_result()
+
+        if (is_ggplot_object(code_result())) {
           plotOutput("plot_result")
-        }else if((is.data.frame(code_result())|is.matrix(code_result()))){
+        } else if (is.data.frame(code_result()) || is.matrix(code_result())) {
           dataTableOutput("data_result")
-        }else{
+        } else {
           HTML(paste("<pre>", code_result(), "</pre>"))
         }
       })
 
       output$plot_result <- renderPlot({
-        if (!is.null(code_result()) && is.ggplot(code_result())) {
+        if (!is.null(code_result()) && is_ggplot_object(code_result())) {
+          print(code_result())
+        }
+      })
+
+      plot_resultout <- reactive({
+        if (!is.null(code_result()) && is_ggplot_object(code_result())) {
           code_result()
         }
       })
-      plot_resultout<-reactive({
-        if (!is.null(code_result()) && is.ggplot(code_result())) {
+
+      output$data_result <- renderDataTable({
+        if (!is.null(code_result()) &&
+            (is.data.frame(code_result()) || is.matrix(code_result()))) {
+          datatable(
+            as.data.frame(code_result()),
+            options = list(pageLength = 10, scrollX = TRUE)
+          )
+        }
+      })
+
+      data_resultout <- reactive({
+        if (!is.null(code_result()) &&
+            (is.data.frame(code_result()) || is.matrix(code_result()))) {
           code_result()
         }
       })
-      output$data_result<-renderDataTable({
-        if (!is.null(code_result()) && (is.data.frame(code_result())|is.matrix(code_result()))) {
-          code_result()
-        }
-      })
-      data_resultout<-reactive({
-        if (!is.null(code_result()) && (is.data.frame(code_result())|is.matrix(code_result()))) {
-          code_result()
-        }
-      })
-      output$DivergingBarllmplotdl<-downloadHandler(
-        filename = function(){
-          if(is.ggplot(code_result())){
-            paste("Adjusted.by.LLM_Bar.plot",usertimenum,".pdf",sep="")
-          }else{
-            paste("Adjusted.by.LLM_Bar.table",usertimenum,".csv",sep="")
+
+      output$DivergingBarllmplotdl <- downloadHandler(
+        filename = function() {
+          timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+
+          if (is_ggplot_object(code_result())) {
+            paste0("Adjusted.by.LLM_Bar.plot_", timestamp, ".pdf")
+          } else {
+            paste0("Adjusted.by.LLM_Bar.table_", timestamp, ".csv")
           }
         },
-        content = function(file){
-          if(is.ggplot(code_result())){
-            pdf(file, width = 10,height = 10)
+
+        content = function(file) {
+          if (is_ggplot_object(code_result())) {
+            pdf(file, width = 10, height = 10)
             print(plot_resultout())
             dev.off()
-          }else{
-            write.csv(data_resultout(),file)
+          } else {
+            write.csv(data_resultout(), file)
           }
         }
       )
-
     })
 
     observeEvent(input$clear, {
       chat_history(list())
       code_result(NULL)
+
       output$chat_output <- renderUI({
         HTML("")
       })
+
       output$code_output <- renderUI({
         HTML("")
       })
     })
-
   }
 )
 
