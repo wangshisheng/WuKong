@@ -11,8 +11,6 @@ library(shinyAce)
 library(zip)
 library(commonmark)
 library(preprocessCore)
-
-# ===== New libraries for optimized Conversation and WuKongmini =====
 library(shinyjs)
 library(httr2)
 library(jsonlite)
