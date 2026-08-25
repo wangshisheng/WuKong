@@ -259,434 +259,231 @@ Smaller models are suitable for lightweight tasks, while larger models usually p
 
 Before running WuKong, please install the required R packages.
 
-### Core / Interface
+Based on the WuKong source code and function modules, the following packages are required or recommended.
+
+### Core Shiny and interface packages
 
 ```r
 shiny
+shinyBS
+shinyjqui
+shinyAce
 DT
 markdown
-shinyjs
-shinyBS
-shinyWidgets
-shinydashboard
-esquisse
 commonmark
 htmltools
 rstudioapi
-shinyAce
-shinyjqui
 zip
 ```
 
-### Data I/O / Preprocessing
+### Data input, output, and preprocessing packages
 
 ```r
-httr
 openxlsx
-writexl
-reshape2
-dplyr
-tidyr
-preprocessCore
-rvest
-tidyverse
-Amelia
-data.table
 gdata
-httr2
-impute
-jsonlite
-purrr
-tibble
+writexl
+data.table
+reshape2
+preprocessCore
 MSnbase
+impute
 ```
 
-### Statistical Analysis
-
-```r
-ellipse
-psych
-ape
-factoextra
-limma
-ropls
-rstatix
-vegan
-DNB
-FactoMineR
-GRA
-RRHO2
-ade4
-akima
-alr3
-corrr
-funnelR
-marray
-mdatools
-pROC
-plotRCS
-pwr
-samr
-survival
-survminer
-tidyestimate
-timecourse
-coin
-rms
-survcomp
-```
-
-### Functional Annotation
-
-```r
-clusterProfiler
-enrichplot
-Seurat
-ggseqlogo
-ggtree
-GO.db
-UniProt.ws
-org.Hs.eg.db
-```
-
-### Visualization
-
-```r
-ggplot2
-ggsci
-scales
-ggpubr
-ggrepel
-ggcorrplot
-ggforce
-ggplotify
-ggraph
-patchwork
-pheatmap
-GGally
-LSD
-ggExtra
-ggdist
-gghalves
-ggpie
-ggpmisc
-ggradar
-ggridges
-ggsankey
-ggtern
-ggupset
-ggvegan
-ggvenn
-ggwordcloud
-igraph
-tidygraph
-ComplexUpset
-RColorBrewer
-VennDiagram
-cowplot
-wordcloud2
-```
-
-### Clustering
-
-```r
-ConsensusClusterPlus
-Mfuzz
-Rtsne
-cluster
-umap
-```
-
-### LLM / AI Interface
+### LLM interface packages
 
 ```r
 ollamar
+```
+
+### Statistical analysis packages
+
+```r
+limma
+samr
+ConsensusClusterPlus
+Mfuzz
+FactoMineR
+vegan
+Rtsne
+umap
+ropls
+pheatmap
+survival
+survminer
+rms
+pROC
+```
+
+### Functional annotation packages
+
+```r
+clusterProfiler
+GO.db
+org.Hs.eg.db
+UniProt.ws
+Seurat
 ceLLama
 ```
 
-### Utilities
+Depending on your species of interest, additional organism annotation packages may be required. For example:
 
 ```r
-knitr
-rmarkdown
+org.Mm.eg.db
+org.Rn.eg.db
 ```
 
-### Base R
+### Visualization packages
 
 ```r
-base
-grid
-utils
+ggplot2
+ggpubr
+ggrepel
+ggsci
+ggdist
+ggsankey
+ggradar
+ggupset
+ggExtra
+ggcorrplot
+ggtree
+ggseqlogo
+ggtern
+wordcloud2
+igraph
+tidygraph
+ggraph
+VennDiagram
+ComplexUpset
+RColorBrewer
+cowplot
+patchwork
 ```
 
-## Package Installation Methods
-
-### CRAN
+Please note that the main WuKong interface directly loads the following packages in the provided source code:
 
 ```r
-install.packages(c(
-  "Amelia",
-  "ComplexUpset",
+shiny
+shinyBS
+shinyjqui
+openxlsx
+gdata
+DT
+ollamar
+markdown
+shinyAce
+zip
+commonmark
+preprocessCore
+```
+
+Other packages are required by individual analysis modules, downstream statistical functions, functional annotation, or visualization scripts.
+
+## One-click Installation of R Packages
+
+You may run the following R code to install and load most required packages.
+
+```r
+if (!requireNamespace("pacman", quietly = TRUE)) {
+  install.packages("pacman")
+}
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (!requireNamespace("devtools", quietly = TRUE)) {
+  install.packages("devtools")
+}
+
+cran_pkgs <- c(
+  "shiny",
+  "shinyBS",
+  "shinyjqui",
+  "shinyAce",
   "DT",
-  "FactoMineR",
-  "GGally",
-  "LSD",
-  "RColorBrewer",
-  "Rtsne",
-  "VennDiagram",
-  "ade4",
-  "akima",
-  "alr3",
-  "ape",
-  "cluster",
-  "coin",
+  "markdown",
   "commonmark",
-  "corrr",
-  "cowplot",
-  "data.table",
-  "dplyr",
-  "ellipse",
-  "esquisse",
-  "factoextra",
-  "funnelR",
+  "htmltools",
+  "openxlsx",
   "gdata",
+  "writexl",
+  "zip",
+  "rstudioapi",
+  "data.table",
+  "reshape2",
+  "ggplot2",
+  "ggpubr",
+  "ggrepel",
+  "ggsci",
+  "ggdist",
+  "ggradar",
   "ggExtra",
   "ggcorrplot",
-  "ggdist",
-  "ggforce",
-  "gghalves",
-  "ggpie",
-  "ggplot2",
-  "ggplotify",
-  "ggpmisc",
-  "ggpubr",
-  "ggradar",
-  "ggraph",
-  "ggrepel",
-  "ggridges",
-  "ggsci",
-  "ggtern",
-  "ggupset",
-  "ggvegan",
-  "ggvenn",
-  "ggwordcloud",
-  "htmltools",
-  "httr",
-  "httr2",
-  "igraph",
-  "jsonlite",
-  "knitr",
-  "markdown",
-  "mdatools",
-  "ollamar",
-  "openxlsx",
-  "pROC",
-  "patchwork",
   "pheatmap",
-  "plotRCS",
-  "psych",
-  "purrr",
-  "pwr",
-  "reshape2",
-  "rmarkdown",
-  "rms",
-  "rstatix",
-  "rstudioapi",
-  "rvest",
-  "scales",
-  "shiny",
-  "shinyAce",
-  "shinyBS",
-  "shinyWidgets",
-  "shinydashboard",
-  "shinyjqui",
-  "shinyjs",
+  "FactoMineR",
+  "vegan",
+  "Rtsne",
+  "umap",
   "survival",
   "survminer",
-  "tibble",
-  "tidyestimate",
+  "rms",
+  "pROC",
+  "igraph",
   "tidygraph",
-  "tidyr",
-  "tidyverse",
-  "umap",
-  "vegan",
+  "ggraph",
+  "VennDiagram",
+  "RColorBrewer",
+  "cowplot",
+  "patchwork",
   "wordcloud2",
-  "writexl",
-  "zip"
-))
-```
+  "ggupset",
+  "ggtern",
+  "ComplexUpset",
+  "ollamar"
+)
 
-### Bioconductor
+for (pkg in cran_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+  }
+}
 
-```r
-BiocManager::install(c(
-  "ConsensusClusterPlus",
-  "GO.db",
+bioc_pkgs <- c(
+  "preprocessCore",
   "MSnbase",
-  "Mfuzz",
-  "Seurat",
-  "UniProt.ws",
-  "clusterProfiler",
-  "enrichplot",
-  "ggseqlogo",
-  "ggtree",
   "impute",
   "limma",
-  "marray",
-  "org.Hs.eg.db",
-  "preprocessCore",
-  "ropls",
   "samr",
-  "survcomp",
-  "timecourse"
-))
+  "ConsensusClusterPlus",
+  "Mfuzz",
+  "ropls",
+  "clusterProfiler",
+  "GO.db",
+  "org.Hs.eg.db",
+  "UniProt.ws",
+  "Seurat",
+  "ggtree",
+  "ggseqlogo"
+)
+
+for (pkg in bioc_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    BiocManager::install(pkg, ask = FALSE, update = FALSE)
+  }
+}
+
+devtools::install_github("CelVoxes/ceLLama")
+devtools::install_github("anspiess/propagate")
+devtools::install_github("gpli/DNB")
+devtools::install_github("Nisus-Liu/GRA")
+devtools::install_github("ricardo-bion/ggradar")
+devtools::install_github("kunhuo/plotRCS")
+devtools::install_github("gavinsimpson/ggvegan")
+devtools::install_github("RRHO2/RRHO2", build_opts = c("--no-resave-data", "--no-manual"))
+devtools::install_github("davidsjoberg/ggsankey")
+devtools::install_github("nicolash2/ggvenn")
+
 ```
-
-### GitHub
-
-```r
-# ggsankey (per WuKong README)
-remotes::install_github("davidsjoberg/ggsankey")
-
-# RRHO2 (exact repository needs verification)
-# remotes::install_github("RRHO2/RRHO2")
-# remotes::install_github("shenlab-sinai/RRHO2")
-```
-
-### Local / Source packages
-
-None found: every detected package is installed from an external repository (
-no bundled/local package source was detected in the project tree).
-
-### Unknown / Requires Verification
-
-The following packages are used in source code but their canonical installation channel could not be reliably established from project evidence or repository checks:
-
-- **DNB** — Dynamic network biomarker; not on CRAN/Bioconductor, no GitHub repo confirmed
-- **GRA** — Grey relational analysis; not on CRAN/Bioconductor, no GitHub repo confirmed
-- **ceLLama** — LLM cell-type annotation; install per its official instructions (README)
-
-Also note: `seurat` and `samr` are installed via `BiocManager` per the WuKong README, although both are also available from CRAN; `shinyBS` is archived on CRAN and may need an archive/GitHub installation.
-
-## Package Usage Summary
-
-| Package | Category | Installation Source | Reference Count | Notes |
-|---|---|---|---:|---|
-| shiny | Core / Interface | CRAN | 152 | Main Shiny application server (e.g., R/rfunctions.R; ...) |
-| DT | Core / Interface | CRAN | 76 | Data tables in Shiny UI (e.g., inst/home/app.R; ...) |
-| markdown | Core / Interface | CRAN | 76 | inst/home/app.R; ... |
-| shinyjs | Core / Interface | CRAN | 76 | inst/home/app.R; ... |
-| shinyBS | Core / Interface | CRAN | 75 | Archived on CRAN; may require archive/GitHub install (e.g., inst/home/app.R; ...) |
-| shinyWidgets | Core / Interface | CRAN | 75 | inst/home/www/AnalyzeWebPage_LLM/app.R; ... |
-| shinydashboard | Core / Interface | CRAN | 72 | inst/home/www/BarPointplot_LLM/app.R; ... |
-| esquisse | Core / Interface | CRAN | 71 | Interactive ggplot2 builder UI (e.g., inst/home/www/BarPointplot_LLM/app.R; ...) |
-| commonmark | Core / Interface | CRAN | 1 | inst/home/app.R |
-| htmltools | Core / Interface | CRAN | 1 | inst/home/app.R |
-| rstudioapi | Core / Interface | CRAN | 1 | inst/home/app.R |
-| shinyAce | Core / Interface | CRAN | 1 | Code editor UI (e.g., inst/home/app.R) |
-| shinyjqui | Core / Interface | CRAN | 1 | inst/home/app.R |
-| zip | Core / Interface | CRAN | 1 | File compression (e.g., inst/home/app.R) |
-| httr | Data I/O / Preprocessing | CRAN | 75 | HTTP requests (web queries) (e.g., inst/home/www/AnalyzeWebPage_LLM/app.R; ...) |
-| openxlsx | Data I/O / Preprocessing | CRAN | 75 | Excel input/output (e.g., inst/home/app.R; ...) |
-| writexl | Data I/O / Preprocessing | CRAN | 52 | Excel export (e.g., inst/home/www/AnalyzeWebPage_LLM/app.R; ...) |
-| reshape2 | Data I/O / Preprocessing | CRAN | 13 | inst/home/www/BarPointplot_LLM/app.R; ... |
-| dplyr | Data I/O / Preprocessing | CRAN | 12 | inst/home/www/CV_LLM/app.R; ... |
-| tidyr | Data I/O / Preprocessing | CRAN | 6 | inst/home/www/ContourPlot_LLM/app.R; ... |
-| preprocessCore | Data I/O / Preprocessing | Bioconductor | 2 | Normalization of intensity data (e.g., inst/home/app.R; ...) |
-| rvest | Data I/O / Preprocessing | CRAN | 2 | Web scraping (e.g., inst/home/www/AnalyzeWebPage_LLM/app.R; ...) |
-| tidyverse | Data I/O / Preprocessing | CRAN | 2 | Meta-package: dplyr/tidyr/ggplot2, etc. (e.g., inst/home/www/ClusterCorNetwork_LLM/app.R; ...) |
-| Amelia | Data I/O / Preprocessing | CRAN | 1 | Missing-value imputation (e.g., inst/home/www/MissingValue_LLM/app.R) |
-| data.table | Data I/O / Preprocessing | CRAN | 1 | inst/home/www/Celltype_LLM/app.R |
-| gdata | Data I/O / Preprocessing | CRAN | 1 | Legacy Excel/text reading (e.g., inst/home/app.R) |
-| httr2 | Data I/O / Preprocessing | CRAN | 1 | inst/home/app.R |
-| impute | Data I/O / Preprocessing | Bioconductor | 1 | Missing-value imputation (e.g., inst/home/www/MissingValue_LLM/app.R) |
-| jsonlite | Data I/O / Preprocessing | CRAN | 1 | inst/home/app.R |
-| purrr | Data I/O / Preprocessing | CRAN | 1 | inst/home/www/Celltype_LLM/app.R |
-| tibble | Data I/O / Preprocessing | CRAN | 1 | inst/home/www/ContourPlot_LLM/app.R |
-| MSnbase | Data I/O / Preprocessing | Bioconductor | 0 | Listed in README only (0 file references) |
-| ellipse | Statistical Analysis | CRAN | 7 | inst/home/www/FactorAnalysis_LLM/app.R; ... |
-| psych | Statistical Analysis | CRAN | 5 | inst/home/www/CorPlot_LLM/app-tooltips.R; ... |
-| ape | Statistical Analysis | CRAN | 2 | Phylogenetics (e.g., inst/home/www/Dendrogram_LLM/app.R; ...) |
-| factoextra | Statistical Analysis | CRAN | 2 | Multivariate result visualization (e.g., inst/home/www/Kmeans_LLM/app.R; ...) |
-| limma | Statistical Analysis | Bioconductor | 2 | Differential expression (e.g., inst/home/www/DEPlimma_LLM/app.R; ...) |
-| ropls | Statistical Analysis | Bioconductor | 2 | OPLS-DA (e.g., inst/home/www/OPLSDA_LLM/app.R; ...) |
-| rstatix | Statistical Analysis | CRAN | 2 | inst/home/www/BarPointplot_LLM/app.R; ... |
-| vegan | Statistical Analysis | CRAN | 2 | Community ecology / ordination (e.g., inst/home/www/PCoA_LLM/app.R; ...) |
-| DNB | Statistical Analysis | Unknown / requires verification | 1 | Dynamic network biomarker; not on CRAN/Bioconductor, no GitHub repo confirmed (e.g., inst/home/www/DNB_LLM/app.R) |
-| FactoMineR | Statistical Analysis | CRAN | 1 | Multivariate exploratory analysis (e.g., inst/home/www/PCA_LLM/app.R) |
-| GRA | Statistical Analysis | Unknown / requires verification | 1 | Grey relational analysis; not on CRAN/Bioconductor, no GitHub repo confirmed (e.g., inst/home/www/GRA_LLM/app.R) |
-| RRHO2 | Statistical Analysis | GitHub | 1 | Rank-rank hypergeometric overlap v2; repo to verify: RRHO2/RRHO2 or shenlab-sinai/RRHO2 (e.g., inst/home/www/RRHO_LLM/app.R) |
-| ade4 | Statistical Analysis | CRAN | 1 | Multivariate analysis (e.g., inst/home/www/PCoA_LLM/app.R) |
-| akima | Statistical Analysis | CRAN | 1 | Interpolation (e.g., inst/home/www/ContourPlot_LLM/app.R) |
-| alr3 | Statistical Analysis | CRAN | 1 | Applied linear regression companion (e.g., inst/home/www/LackofFit_LLM/app.R) |
-| corrr | Statistical Analysis | CRAN | 1 | Correlation matrices (e.g., inst/home/www/ClusterCorNetwork_LLM/app.R) |
-| funnelR | Statistical Analysis | CRAN | 1 | Funnel plots for proportions (e.g., inst/home/www/FunnelPlot_LLM/app.R) |
-| marray | Statistical Analysis | Bioconductor | 1 | Microarray utilities (used by Mfuzz flow) (e.g., inst/home/www/Mfuzz_LLM/mfuzzcodes.R) |
-| mdatools | Statistical Analysis | CRAN | 1 | Chemometrics (PLS-DA, SIMCA) (e.g., inst/home/www/SIMCA_LLM/app.R) |
-| pROC | Statistical Analysis | CRAN | 1 | ROC analysis (e.g., inst/home/www/ROCplot_LLM/app.R) |
-| plotRCS | Statistical Analysis | CRAN | 1 | Restricted cubic spline plots; verified on CRAN (e.g., inst/home/www/RCS_LLM/app.R) |
-| pwr | Statistical Analysis | CRAN | 1 | inst/home/www/PowerAnalysis_LLM/app.R |
-| samr | Statistical Analysis | Bioconductor | 1 | SAM; per README (also on CRAN) (e.g., inst/home/www/DEPsamr_LLM/app.R) |
-| survival | Statistical Analysis | CRAN | 1 | R recommended package (e.g., inst/home/www/SurvivalPlot_LLM/app.R) |
-| survminer | Statistical Analysis | CRAN | 1 | inst/home/www/SurvivalPlot_LLM/app.R |
-| tidyestimate | Statistical Analysis | CRAN | 1 | Tumor purity estimation; verified on CRAN (e.g., inst/home/www/TumorPurity_LLM/app.R) |
-| timecourse | Statistical Analysis | Bioconductor | 1 | Time-course expression analysis (e.g., inst/home/www/timecourse_LLM/app.R) |
-| coin | Statistical Analysis | CRAN | 0 | Declared in DESCRIPTION only (0 file references) |
-| rms | Statistical Analysis | CRAN | 0 | Listed in README only (0 file references) |
-| survcomp | Statistical Analysis | Bioconductor | 0 | Declared in DESCRIPTION only (0 file references) |
-| clusterProfiler | Functional Annotation | Bioconductor | 4 | GO/KEGG enrichment (e.g., inst/home/www/GOenrich_LLM/app.R; ...) |
-| enrichplot | Functional Annotation | Bioconductor | 2 | Enrichment result visualization helpers (e.g., inst/home/www/gseaGO_LLM/app.R; ...) |
-| Seurat | Functional Annotation | Bioconductor | 1 | Cell-type annotation workflow; per README (also on CRAN) (e.g., inst/home/www/Celltype_LLM/app.R) |
-| ggseqlogo | Functional Annotation | Bioconductor | 1 | Sequence logos (e.g., inst/home/www/ggseqlogo_LLM/app.R) |
-| ggtree | Functional Annotation | Bioconductor | 1 | Phylogenetic tree visualization (e.g., inst/home/www/ggtreeDendrogram_LLM/app.R) |
-| GO.db | Functional Annotation | Bioconductor | 0 | Listed in README only (0 file references) |
-| UniProt.ws | Functional Annotation | Bioconductor | 0 | UniProt web services; listed in README only |
-| org.Hs.eg.db | Functional Annotation | Bioconductor | 0 | Human annotation; listed in README only |
-| ggplot2 | Visualization | CRAN | 76 | inst/home/app.R; ... |
-| ggsci | Visualization | CRAN | 71 | Scientific color palettes (e.g., inst/home/www/BarPointplot_LLM/app.R; ...) |
-| scales | Visualization | CRAN | 54 | Axis/scale helpers for ggplot2 (e.g., inst/home/www/BarPointplot_LLM/app.R; ...) |
-| ggpubr | Visualization | CRAN | 10 | inst/home/www/BarPointplot_LLM/app.R; ... |
-| ggrepel | Visualization | CRAN | 3 | inst/home/www/RankPointPlot_LLM/app.R; ... |
-| ggcorrplot | Visualization | CRAN | 2 | inst/home/www/CorPlot_LLM/app-tooltips.R; ... |
-| ggforce | Visualization | CRAN | 2 | inst/home/www/RainCloud_LLM/app.R; ... |
-| ggplotify | Visualization | CRAN | 2 | Convert graphics to ggplot (e.g., inst/home/www/ConsensusClustering_LLM/app.R; ...) |
-| ggraph | Visualization | CRAN | 2 | Network graphs (e.g., inst/home/www/ClusterCorNetwork_LLM/app.R; ...) |
-| patchwork | Visualization | CRAN | 2 | Plot composition (e.g., inst/home/www/FactorAnalysis_LLM/app.R; ...) |
-| pheatmap | Visualization | CRAN | 2 | Heatmaps (e.g., inst/home/www/ConsensusClustering_LLM/app.R; ...) |
-| GGally | Visualization | CRAN | 1 | inst/home/www/FactorAnalysis_LLM/app.R |
-| LSD | Visualization | CRAN | 1 | Color palettes for dense data (e.g., inst/home/www/Heatscatter_LLM/app.R) |
-| ggExtra | Visualization | CRAN | 1 | inst/home/www/MarginalPlot_LLM/app.R |
-| ggdist | Visualization | CRAN | 1 | inst/home/www/RainCloud_LLM/app.R |
-| gghalves | Visualization | CRAN | 1 | inst/home/www/RainCloud_LLM/app.R |
-| ggpie | Visualization | CRAN | 1 | inst/home/www/PiePlot_LLM/app.R |
-| ggpmisc | Visualization | CRAN | 1 | inst/home/www/LinearRegression_LLM/app.R |
-| ggradar | Visualization | CRAN | 1 | inst/home/www/RadarChart_LLM/app.R |
-| ggridges | Visualization | CRAN | 1 | inst/home/www/RidgePlot_LLM/app.R |
-| ggsankey | Visualization | GitHub | 1 | davidsjoberg/ggsankey (per README) (e.g., inst/home/www/SankeyPlot_LLM/app.R) |
-| ggtern | Visualization | CRAN | 1 | Ternary plots (e.g., inst/home/www/TernaryPlot_LLM/app.R) |
-| ggupset | Visualization | CRAN | 1 | inst/home/www/UpsetPlot_LLM/app.R |
-| ggvegan | Visualization | CRAN | 1 | ggplot2 methods for vegan ordination; verified on CRAN (e.g., inst/home/www/RDA_LLM/app.R) |
-| ggvenn | Visualization | CRAN | 1 | inst/home/www/Venn_LLM/app.R |
-| ggwordcloud | Visualization | CRAN | 1 | inst/home/www/WorldCloud_LLM/app.R |
-| igraph | Visualization | CRAN | 1 | Network analysis/graphs (e.g., inst/home/www/CorrelationNetwork_LLM/app.R) |
-| tidygraph | Visualization | CRAN | 1 | Network data manipulation (e.g., inst/home/www/ClusterCorNetwork_LLM/app.R) |
-| ComplexUpset | Visualization | CRAN | 0 | Listed in README only (0 file references) |
-| RColorBrewer | Visualization | CRAN | 0 | Listed in README only (0 file references) |
-| VennDiagram | Visualization | CRAN | 0 | Listed in README only (0 file references) |
-| cowplot | Visualization | CRAN | 0 | DESCRIPTION-declared; only commented-out references |
-| wordcloud2 | Visualization | CRAN | 0 | Listed in README only (0 file references) |
-| ConsensusClusterPlus | Machine Learning / Clustering | Bioconductor | 1 | Consensus clustering; per README (e.g., inst/home/www/ConsensusClustering_LLM/app.R) |
-| Mfuzz | Machine Learning / Clustering | Bioconductor | 1 | Fuzzy c-means clustering of expression (e.g., inst/home/www/Mfuzz_LLM/app.R) |
-| Rtsne | Machine Learning / Clustering | CRAN | 1 | t-SNE (e.g., inst/home/www/tsne_LLM/app.R) |
-| cluster | Machine Learning / Clustering | CRAN | 1 | R recommended package (e.g., inst/home/www/Dendrogram_LLM/app.R) |
-| umap | Machine Learning / Clustering | CRAN | 1 | UMAP (e.g., inst/home/www/umap_LLM/app.R) |
-| ollamar | LLM / AI Interface | CRAN | 76 | Ollama API client used by all LLM modules (e.g., inst/home/app.R; ...) |
-| ceLLama | LLM / AI Interface | Unknown / requires verification | 1 | LLM cell-type annotation; install per its official instructions (README) (e.g., inst/home/www/Celltype_LLM/app.R) |
-| knitr | Utilities | CRAN | 1 | inst/home/app.R |
-| rmarkdown | Utilities | CRAN | 1 | inst/home/app.R |
-| base | Base R | Base R (bundled) | 3 | Bundled with R (e.g., inst/home/www/ExploreGO_LLM/app.R; ...) |
-| grid | Base R | Base R (bundled) | 1 | Bundled with R (e.g., inst/home/www/ConsensusClustering_LLM/app.R) |
-| utils | Base R | Base R (bundled) | 1 | Bundled with R (e.g., inst/home/app.R) |
 
 Please note that some packages may require system-level dependencies, especially on Linux or macOS. If installation fails, please check the error message and install the corresponding system libraries.
 
@@ -915,14 +712,6 @@ Please check:
 - Whether selected modules are logically connected.
 - Whether the generated R code contains a complete code block marked by triple backticks.
 - Whether all required packages for the selected modules are installed.
-
-## Citation
-
-If you use WuKong in your research, please cite:
-
-WuKong: An LLM-Enhanced Framework for Adaptable Proteomics Analysis.
-
-Citation information will be updated after publication.
 
 ## Contact
 
