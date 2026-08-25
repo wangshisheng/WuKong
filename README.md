@@ -1,6 +1,6 @@
 # WuKong <img src="wukonglogo.png" align="right" height="120" width="135"/>
 
-WuKong: an LLM-enhanced framework for adaptable, reproducible, and privacy-preserving proteomics analysis
+WuKong: An LLM-Enhanced Framework for Adaptable Proteomics Analysis
 
 ## Brief Description
 
