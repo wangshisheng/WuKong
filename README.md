@@ -4,13 +4,15 @@ WuKong: An LLM-Enhanced Framework for Adaptable Proteomics Analysis
 
 ## Brief Description
 
-**WuKong** is an open-source and LLM-enhanced platform designed for adaptable proteomics data analysis. It integrates more than 72 modular analytical tools with locally deployed large language models (LLMs), enabling researchers to perform data preprocessing, statistical analysis, functional annotation, data visualization, and workflow design through either graphical modules or natural-language interactions.
+**WuKong** is an open-source and LLM-enhanced platform designed for adaptable proteomics data analysis. It integrates more than 72 modular analytical tools with multiple large language model (LLM) backends, enabling researchers to perform data preprocessing, statistical analysis, functional annotation, data visualization, and workflow design through either graphical modules or natural-language interactions.
 
 WuKong was developed to bridge the analytical gap between high-throughput proteomics data generation and biological interpretation. Modern mass spectrometry-based proteomics can generate increasingly large and complex datasets, but downstream analysis often requires coding skills, statistical expertise, and manual integration of multiple software tools. WuKong addresses this challenge by embedding LLMs into a modular, code-constrained R-based analytical framework. Users can translate natural-language instructions into transparent, executable, and reproducible bioinformatic workflows.
 
 Unlike general chatbot-based analysis, WuKong uses a prompt-aware execution strategy. The LLM does not work as an unconstrained code generator; instead, it can refer to internal module-specific R code logic and established analytical procedures. This design improves reproducibility, transparency, and methodological reliability while lowering the computational barrier for experimental researchers.
 
-A key feature of WuKong is its support for **local LLM deployment** through [Ollama](https://ollama.com/). This allows sensitive proteomics datasets to remain within local computing environments, making WuKong suitable for clinical proteomics, unpublished datasets, hospital-based cohorts, and privacy-sensitive biomedical research.
+A key feature of WuKong is its flexible LLM integration. The current version supports both cloud-based LLM APIs and local LLM deployment. Users can select from **DeepSeek API**, **Kimi / Moonshot API**, **OpenAI / ChatGPT API**, or **Local Ollama** backends directly within the Conversation module and WuKongmini workflow designer. This design allows users to balance reasoning capability, cost, speed, privacy, and local hardware availability.
+
+For privacy-sensitive projects, WuKong supports **local LLM deployment** through [Ollama](https://ollama.com/). This allows sensitive proteomics datasets to remain within local computing environments, making WuKong suitable for clinical proteomics, unpublished datasets, hospital-based cohorts, and privacy-sensitive biomedical research. For users who prefer stronger cloud-based reasoning or do not have sufficient local hardware, WuKong can call external LLM APIs after users provide the corresponding API keys in the interface.
 
 WuKong supports both routine proteomics analysis and complex exploratory workflows, including bulk proteomics, single-cell proteomics, phosphoproteomics, pathway interpretation, biomarker discovery, survival analysis, and publication-quality visualization.
 
@@ -18,13 +20,19 @@ WuKong supports both routine proteomics analysis and complex exploratory workflo
 
 - **Comprehensive modular coverage:** WuKong integrates more than 72 analytical modules covering data preprocessing, statistical analysis, functional enrichment, biomarker discovery, visualization, and workflow design.
 
-- **Dual-mode analytical interaction:** Users can perform analyses through conventional GUI-based modules or natural-language interactions powered by locally deployed LLMs.
+- **Dual-mode analytical interaction:** Users can perform analyses through conventional GUI-based modules or natural-language interactions powered by cloud-based LLM APIs or locally deployed LLMs.
+
+- **Multi-backend LLM support:** WuKong supports DeepSeek API, Kimi / Moonshot API, OpenAI / ChatGPT API, and local Ollama models. Users can switch backends in the interface according to their analysis needs, privacy requirements, and computing resources.
+
+- **Secure API-key input:** For cloud LLM APIs, users only need to paste the required API key into the corresponding input box in WuKong. The API key is used only for the current request/session and is not saved by WuKong.
 
 - **Prompt-aware architecture:** WuKong allows LLMs to reference internal R code logic, helping natural-language prompts generate precise, transparent, and reproducible outputs.
 
 - **Privacy-preserving local AI:** WuKong supports local LLM backends through Ollama, so sensitive data do not need to be uploaded to external cloud servers.
 
-- **Workflow designer:** WuKongmini enables users to upload data, define groups, select modules, describe workflow requirements, generate refined R scripts, execute analyses, and download results.
+- **LLM connection testing:** The Conversation module and WuKongmini include built-in AI connection tests. Users can verify the selected backend, model name, default context length, response status, and elapsed time before running analyses.
+
+- **Workflow designer:** WuKongmini enables users to upload data, define groups, select modules, describe workflow requirements, generate refined R scripts, execute analyses step by step, obtain bilingual scientific interpretations, and download results.
 
 ## Function Modules
 
@@ -32,9 +40,20 @@ WuKong is organized into six major functional sections.
 
 ### 1. Conversation
 
-The Conversation module allows users to chat with locally deployed LLMs. Users can ask questions about data analysis, statistical methods, proteomics workflows, R code, visualization adjustment, functional interpretation, or WuKong platform usage.
+The Conversation module allows users to chat with either cloud-based or locally deployed LLMs. Users can ask questions about data analysis, statistical methods, proteomics workflows, R code, visualization adjustment, functional interpretation, or WuKong platform usage.
 
-The available LLMs are automatically detected from locally installed Ollama models.
+The current Conversation module supports the following LLM backends:
+
+- **DeepSeek API**
+- **Kimi / Moonshot API**
+- **OpenAI / ChatGPT API**
+- **Local Ollama**
+
+Users can select the preferred backend directly in the interface. For API-based backends, users only need to paste the corresponding API key into the password input box in WuKong. The API key is used for model access during the current interaction and is not saved by WuKong. For local Ollama, users can choose from registered models, automatically detected local models, or manually enter a custom local model name.
+
+The module also includes a **Test AI Connection** button. This function sends a lightweight test request to the selected backend and reports whether the connection is successful, which model is being used, the default maximum context length, elapsed time, and the model response or error message.
+
+The Conversation module can also detect R code blocks returned by the assistant and attempt to execute them within the R session, allowing users to iteratively refine analysis code and inspect generated tables or plots.
 
 ### 2. Data Pre-processing
 
@@ -149,10 +168,18 @@ It supports:
 2. Defining sample group names and replicate numbers.
 3. Selecting ordered modules from preprocessing, statistics, functional annotation, and visualization.
 4. Describing workflow requirements in natural language.
-5. Using local LLMs to refine module-specific reference codes into a single executable R script.
-6. Running the workflow step by step.
-7. Displaying tables, plots, and LLM-generated scientific summaries.
-8. Downloading workflow results as a `.zip` file.
+5. Selecting an LLM backend from DeepSeek API, Kimi / Moonshot API, OpenAI / ChatGPT API, or Local Ollama.
+6. Entering the required API key in WuKong when a cloud LLM API is selected. The API key is not saved by WuKong.
+7. Testing the selected AI backend before workflow execution.
+8. Using the selected LLM to refine module-specific reference codes into a single executable R script.
+9. Running the workflow step by step in an isolated R execution environment.
+10. Displaying tables, plots, error messages, and result summaries.
+11. Generating bilingual English-Chinese scientific interpretations for each workflow step.
+12. Downloading refined R code, stepwise outputs, interpretation text, and an HTML report as a `.zip` file.
+
+WuKongmini uses a prompt-aware and stepwise execution strategy. The selected modules are converted into reference-code blocks, and the LLM is instructed to preserve the original analytical logic, define clear input and output objects for each step, load required packages, and return meaningful tables or plots. This makes the generated workflow more transparent and easier to debug.
+
+For functional annotation, WuKongmini also includes logic to help the LLM handle species information carefully. For example, KEGG enrichment analysis requires KEGG organism codes such as `hsa`, `mmu`, or `rno`, while the user-facing species value may be provided as `9606-Homo sapiens` or another species string.
 
 Two example pipelines are provided in WuKongmini.
 
@@ -166,6 +193,7 @@ Example Pipeline 1:
 6. PCA using differentially expressed proteins
 7. HCA using differentially expressed proteins
 8. GO enrichment analysis using differentially expressed proteins
+9. KEGG enrichment analysis using differentially expressed proteins
 
 Example Pipeline 2:
 
@@ -205,30 +233,34 @@ You can download RStudio from:
 
 [https://posit.co/download/rstudio-desktop/](https://posit.co/download/rstudio-desktop/)
 
-### 3. Install Ollama
+### 3. Configure LLM Backends
 
-WuKong uses locally deployed LLMs through Ollama.
+WuKong supports both cloud API backends and local Ollama backends.
+
+#### Option A: Cloud LLM APIs
+
+WuKong currently supports:
+
+- **DeepSeek API**
+- **Kimi / Moonshot API**
+- **OpenAI / ChatGPT API**
+
+When using a cloud LLM API, users only need to select the corresponding backend in WuKong and paste the API key into the API-key input box shown in the interface.
+
+The API key is used only to send requests to the selected LLM provider during the current WuKong session. WuKong does **not** save, export, or permanently store the API key. This makes API-based usage convenient while keeping key management safe and transparent.
+
+#### Option B: Local Ollama
+
+WuKong also supports locally deployed LLMs through Ollama.
 
 Please install Ollama from:
 
 [https://ollama.com/](https://ollama.com/)
 
-After installation, please pull at least one supported local model. For example:
+After installation, please pull at least one local model. For example:
 
 ```bash
-ollama pull gemma3:4b
-```
-
-or
-
-```bash
-ollama pull qwen3:4b
-```
-
-or
-
-```bash
-ollama pull deepseek-r1:7b
+ollama run qwen3.8:27b
 ```
 
 You can check installed models by running:
@@ -237,23 +269,40 @@ You can check installed models by running:
 ollama list
 ```
 
-WuKong will automatically detect available local Ollama models through the `ollamar` R package.
+WuKong communicates with the local Ollama service through:
 
-## Supported Local LLMs
+```text
+http://localhost:11434/api/chat
+```
 
-WuKong supports multiple locally deployed LLM backends through Ollama.
+Please make sure the Ollama service is running before selecting the Local Ollama backend in WuKong.
 
-Examples include:
+## Supported LLM Backends and Models
 
-| Model family | Supported models |
-|---|---|
-| Gemma | `gemma3:4b`, `gemma3:27b`, `gemma2:9b`, `gemma2:27b` |
-| DeepSeek | `deepseek-r1:7b`, `deepseek-r1:32b` |
-| Qwen | `qwen3:4b`, `qwen3:30b` |
-| Phi | `phi4:14b` |
-| Devstral | `devstral:24b` |
+WuKong provides an internal LLM model registry and supports four backend types.
 
-Smaller models are suitable for lightweight tasks, while larger models usually provide stronger reasoning and code refinement performance.
+| Backend | Default / Registered Models | Access Mode | Notes |
+|---|---|---|---|
+| DeepSeek API | `deepseek-v4-pro`, `deepseek-v4-flash` | Cloud API | Uses DeepSeek chat completions. WuKong enables high reasoning effort and thinking mode by default where supported. |
+| Kimi / Moonshot API | `kimi-k3` | Cloud API | Suitable for bilingual scientific writing, long-context interpretation, and workflow refinement. |
+| OpenAI / ChatGPT API | `gpt-5.6-luna` | Cloud API | Called through the OpenAI Responses API. |
+| Local Ollama | `qwen3.8:27b` | Local service | Keeps data in the local computing environment. Custom local model names are also supported. |
+
+WuKong assigns model-specific default context lengths and output token limits in its internal registry. Registered cloud models use large context settings, while registered local Ollama models are configured with long-context defaults when supported.
+
+For Local Ollama, WuKong can use:
+
+1. Registered models defined in WuKong.
+2. Models detected from the local Ollama service.
+3. Custom model names manually entered by the user.
+
+When using a custom Ollama model, the model name must match a model already available in your local Ollama service. You can check available local models with:
+
+```bash
+ollama list
+```
+
+Smaller models are suitable for lightweight conversation and simple code editing, while larger models usually provide stronger reasoning, code refinement, and workflow planning performance. Large local models may require substantial RAM, VRAM, and CPU/GPU resources.
 
 ## Required R Packages
 
@@ -267,11 +316,14 @@ Based on the WuKong source code and function modules, the following packages are
 shiny
 shinyBS
 shinyjqui
+shinyjs
 shinyAce
 DT
 markdown
 commonmark
 htmltools
+rmarkdown
+knitr
 rstudioapi
 zip
 ```
@@ -289,11 +341,15 @@ MSnbase
 impute
 ```
 
-### LLM interface packages
+### LLM and API interface packages
 
 ```r
 ollamar
+httr2
+jsonlite
 ```
+
+WuKong uses `httr2` and `jsonlite` to communicate with DeepSeek, Kimi / Moonshot, OpenAI, and local Ollama endpoints. The `ollamar` package is also loaded for compatibility with Ollama-related workflows.
 
 ### Statistical analysis packages
 
@@ -374,6 +430,12 @@ shinyAce
 zip
 commonmark
 preprocessCore
+shinyjs
+httr2
+jsonlite
+htmltools
+rmarkdown
+knitr
 ```
 
 Other packages are required by individual analysis modules, downstream statistical functions, functional annotation, or visualization scripts.
@@ -399,11 +461,14 @@ cran_pkgs <- c(
   "shiny",
   "shinyBS",
   "shinyjqui",
+  "shinyjs",
   "shinyAce",
   "DT",
   "markdown",
   "commonmark",
   "htmltools",
+  "rmarkdown",
+  "knitr",
   "openxlsx",
   "gdata",
   "writexl",
@@ -439,7 +504,9 @@ cran_pkgs <- c(
   "ggupset",
   "ggtern",
   "ComplexUpset",
-  "ollamar"
+  "ollamar",
+  "httr2",
+  "jsonlite"
 )
 
 for (pkg in cran_pkgs) {
@@ -625,10 +692,13 @@ WuKong separated untreated and G2/M-arrested cells and identified treatment-asso
 
 1. Please use Chrome, Firefox, or Microsoft Edge for the best user experience.
 2. RStudio is recommended because WuKong launches module scripts through `rstudioapi::jobRunScript()`.
-3. Please make sure Ollama is installed and running before using LLM-related functions.
-4. At least one Ollama model should be installed before starting WuKong.
-5. Larger LLMs usually require stronger hardware and more memory.
-6. For large proteomics datasets, sufficient RAM is recommended.
+3. Please configure at least one LLM backend before using LLM-related functions.
+4. For cloud LLM APIs, please select the corresponding backend and paste the API key into the WuKong interface. WuKong does not save the API key.
+5. For local Ollama, please make sure Ollama is installed and running before selecting the Local Ollama backend.
+6. At least one Ollama model should be installed before using Local Ollama.
+7. Larger LLMs usually require stronger hardware and more memory.
+8. For large proteomics datasets, sufficient RAM is recommended.
+9. Use the built-in **Test AI Connection** button before running long WuKongmini workflows.
 
 Suggested minimum hardware:
 
@@ -637,11 +707,11 @@ Suggested minimum hardware:
 - CPU: modern multi-core processor
 - GPU: optional but recommended for large local LLMs
 
-For larger LLMs such as `deepseek-r1:32b`, `gemma3:27b`, or `qwen3:30b`, higher memory and GPU acceleration are recommended.
+For larger local LLMs such as `qwen3.8:27b`, `gemma3:27b`, higher memory and GPU acceleration are recommended.
 
 ## Troubleshooting
 
-### 1. No model is shown in the model selection box
+### 1. No model is shown in the Ollama model selection box
 
 Please check whether Ollama is installed and running.
 
@@ -654,22 +724,61 @@ ollama list
 If no model is available, pull a model:
 
 ```bash
-ollama pull gemma3:4b
+ollama pull qwen3.8:27b
 ```
 
 Then restart WuKong.
 
-### 2. `ollamar::list_models()` returns an error
+### 2. Local Ollama connection fails
 
 Please make sure the Ollama service is active.
 
 You can test Ollama using:
 
 ```bash
-ollama run gemma3:4b
+ollama run qwen3.8:27b
 ```
 
-### 3. A module cannot be launched
+You can also check the local Ollama API endpoint:
+
+```text
+http://localhost:11434/api/tags
+```
+
+If WuKong reports a connection error, please check:
+
+- Whether Ollama is installed.
+- Whether the Ollama service is running.
+- Whether the selected model exists locally.
+- Whether the custom model name exactly matches the result of `ollama list`.
+- Whether the local firewall or proxy blocks access to `localhost:11434`.
+
+### 3. Cloud API connection fails
+
+Please check:
+
+- Whether the selected backend is correct.
+- Whether the API key was correctly pasted into the corresponding WuKong input box.
+- Whether the API key is valid.
+- Whether the selected model name is supported by your account or endpoint.
+- Whether your network can access the API provider.
+- Whether the account has sufficient quota or billing access.
+
+WuKong does not save the API key entered by the user. The built-in **Test AI Connection** button can help diagnose backend, model, context length, elapsed time, and error messages.
+
+### 4. `ollamar::list_models()` returns an error
+
+Please make sure the Ollama service is active.
+
+You can test Ollama using:
+
+```bash
+ollama run qwen3.8:27b
+```
+
+Although WuKong now communicates with Ollama mainly through HTTP requests to the local Ollama API, `ollamar` is still loaded for compatibility with Ollama-related workflows.
+
+### 5. A module cannot be launched
 
 WuKong uses:
 
@@ -679,7 +788,7 @@ rstudioapi::jobRunScript()
 
 to launch module scripts. Please run WuKong in RStudio and make sure the WuKong package has been correctly installed.
 
-### 4. Some R packages cannot be installed
+### 6. Some R packages cannot be installed
 
 Some Bioconductor packages require compatible R and Bioconductor versions.
 
@@ -695,15 +804,16 @@ BiocManager::install()
 
 Then install the failed packages one by one to identify dependency issues.
 
-### 5. Functional annotation fails
+### 7. Functional annotation fails
 
 Please check:
 
 - Whether the selected species is correct.
 - Whether the input IDs are compatible with the selected annotation database.
 - Whether `clusterProfiler`, `GO.db`, `UniProt.ws`, and organism annotation packages are installed.
+- Whether KEGG-related analysis uses a valid KEGG organism code, such as `hsa`, `mmu`, or `rno`.
 
-### 6. The workflow designer produces code but no result
+### 8. The workflow designer produces code but no result
 
 Please check:
 
@@ -712,6 +822,19 @@ Please check:
 - Whether selected modules are logically connected.
 - Whether the generated R code contains a complete code block marked by triple backticks.
 - Whether all required packages for the selected modules are installed.
+- Whether the selected LLM backend returned valid R code instead of an API error message.
+- Whether package-loading statements are included in the generated workflow code.
+
+### 9. WuKongmini result interpretation fails
+
+WuKongmini generates bilingual scientific interpretation through a second LLM request after stepwise execution. If interpretation fails, please check:
+
+- Whether the selected LLM backend is still reachable.
+- Whether the model context length is sufficient for the workflow code and result summaries.
+- Whether the API quota or local model memory is sufficient.
+- Whether the stepwise output is extremely large.
+
+For large workflows, using a stronger long-context model is recommended.
 
 ## Contact
 
