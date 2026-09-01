@@ -18,7 +18,7 @@ WuKong supports both routine proteomics analysis and complex exploratory workflo
 
 ## Key Features
 
-- **Comprehensive modular coverage:** WuKong integrates more than 72 analytical modules covering data preprocessing, statistical analysis, functional enrichment, biomarker discovery, visualization, and workflow design.
+- **Comprehensive modular coverage:** WuKong integrates more than 72 analytical modules covering data preprocessing, statistical analysis, functional enrichment, visualization, and workflow design.
 
 - **Dual-mode analytical interaction:** Users can perform analyses through conventional GUI-based modules or natural-language interactions powered by cloud-based LLM APIs or locally deployed LLMs.
 
@@ -29,8 +29,6 @@ WuKong supports both routine proteomics analysis and complex exploratory workflo
 - **Prompt-aware architecture:** WuKong allows LLMs to reference internal R code logic, helping natural-language prompts generate precise, transparent, and reproducible outputs.
 
 - **Privacy-preserving local AI:** WuKong supports local LLM backends through Ollama, so sensitive data do not need to be uploaded to external cloud servers.
-
-- **LLM connection testing:** The Conversation module and WuKongmini include built-in AI connection tests. Users can verify the selected backend, model name, default context length, response status, and elapsed time before running analyses.
 
 - **Workflow designer:** WuKongmini enables users to upload data, define groups, select modules, describe workflow requirements, generate refined R scripts, execute analyses step by step, obtain bilingual scientific interpretations, and download results.
 
