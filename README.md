@@ -4,7 +4,7 @@ WuKong: An LLM-Enhanced Framework for Adaptable Proteomics Analysis
 
 ## Brief Description
 
-**WuKong** is an open-source and LLM-enhanced platform designed for adaptable proteomics data analysis. It integrates more than 72 modular analytical tools with multiple large language model (LLM) backends, enabling researchers to perform data preprocessing, statistical analysis, functional annotation, data visualization, and workflow design through either graphical modules or natural-language interactions.
+**WuKong** is an open-source and LLM-enhanced platform designed for adaptable proteomics data analysis. It integrates more than 72 modular analytical tools with multiple large language model (LLM) backends, enabling researchers to perform data preprocessing, statistical analysis, functional annotation, data visualization, and workflow design.
 
 WuKong was developed to bridge the analytical gap between high-throughput proteomics data generation and biological interpretation. Modern mass spectrometry-based proteomics can generate increasingly large and complex datasets, but downstream analysis often requires coding skills, statistical expertise, and manual integration of multiple software tools. WuKong addresses this challenge by embedding LLMs into a modular, code-constrained R-based analytical framework. Users can translate natural-language instructions into transparent, executable, and reproducible bioinformatic workflows.
 
