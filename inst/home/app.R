@@ -11,6 +11,8 @@ library(shinyAce)
 library(zip)
 library(commonmark)
 library(preprocessCore)
+
+# ===== New libraries for optimized Conversation and WuKongmini =====
 library(shinyjs)
 library(httr2)
 library(jsonlite)
@@ -109,94 +111,156 @@ summarize_result_object <- function(obj, max_rows = 8, max_cols = 8) {
 # LLM model registry and callers:
 # DeepSeek API, Moonshot/Kimi API, OpenAI Responses API, Local Ollama
 # ============================================================
-
 llm_model_registry <- data.frame(
   provider = c(
-    rep("deepseek", 2),
-    rep("kimi", 3),
-    rep("openai", 4),
-    rep("ollama", 4)
+    "deepseek",
+    "deepseek",
+    "kimi",
+    "openai",
+    "ollama",
+    "ollama"
   ),
   provider_label = c(
-    rep("DeepSeek API", 2),
-    rep("Kimi / Moonshot API", 3),
-    rep("OpenAI / ChatGPT API", 4),
-    rep("Local Ollama", 4)
+    "DeepSeek API",
+    "DeepSeek API",
+    "Kimi / Moonshot API",
+    "OpenAI / ChatGPT API",
+    "Local Ollama",
+    "Local Ollama"
   ),
   model = c(
-    "deepseek-v4-pro",
     "deepseek-v4-flash",
+    "deepseek-v4-pro",
 
     "kimi-k3",
-    "kimi-k2-0905-preview",
-    "kimi-latest",
 
     "gpt-5.6-luna",
-    "gpt-5.6",
-    "gpt-5.5",
-    "gpt-4.1",
 
-    "qwen3.6:35b",
-    "gemma3:27b",
-    "llama3.3:70b",
-    "qwen2.5:72b"
+    "qwen3.8:27b",
+    "gemma3:27b"
   ),
   label = c(
-    "DeepSeek V4 Pro",
     "DeepSeek V4 Flash",
+    "DeepSeek V4 Pro",
 
     "Kimi K3",
-    "Kimi K2 0905 Preview",
-    "Kimi Latest",
 
     "GPT-5.6 Luna",
-    "GPT-5.6",
-    "GPT-5.5",
-    "GPT-4.1",
 
-    "Qwen 3.6 35B",
-    "Gemma 3 27B",
-    "Llama 3.3 70B",
-    "Qwen 2.5 72B"
+    "Qwen 3.8 27B",
+    "Gemma 3 27B"
   ),
   max_context = c(
-    128000,
-    128000,
+    1000000,
+    1000000,
 
-    128000,
-    128000,
-    128000,
+    1000000,
+
+    1000000,
 
     256000,
-    256000,
-    256000,
-    128000,
-
-    131072,
-    131072,
-    131072,
-    131072
+    128000
   ),
   default_num_predict = c(
-    8192,
-    8192,
+    128000,
+    128000,
 
-    8192,
-    8192,
-    8192,
+    128000,
 
-    16384,
-    16384,
-    16384,
-    8192,
+    128000,
 
-    8192,
-    8192,
-    8192,
-    8192
+    64000,
+    64000
   ),
   stringsAsFactors = FALSE
 )
+#llm_model_registry <- data.frame(
+#  provider = c(
+#    rep("deepseek", 2),
+#    rep("kimi", 3),
+#    rep("openai", 4),
+#    rep("ollama", 4)
+#  ),
+#  provider_label = c(
+#    rep("DeepSeek API", 2),
+#    rep("Kimi / Moonshot API", 3),
+#    rep("OpenAI / ChatGPT API", 4),
+#    rep("Local Ollama", 4)
+#  ),
+#  model = c(
+#    "deepseek-v4-pro",
+#    "deepseek-v4-flash",
+#
+#    "kimi-k3",
+#    "kimi-k2-0905-preview",
+#    "kimi-latest",
+#
+#    "gpt-5.6-luna",
+#    "gpt-5.6",
+#    "gpt-5.5",
+#    "gpt-4.1",
+#
+#    "qwen3.8:27b",
+#    "gemma3:27b",
+#    "llama3.3:70b",
+#    "qwen2.5:72b"
+#  ),
+#  label = c(
+#    "DeepSeek V4 Pro",
+#    "DeepSeek V4 Flash",
+#
+#    "Kimi K3",
+#    "Kimi K2 0905 Preview",
+#    "Kimi Latest",
+#
+#    "GPT-5.6 Luna",
+#    "GPT-5.6",
+#    "GPT-5.5",
+#    "GPT-4.1",
+#
+#    "Qwen 3.6 35B",
+#    "Gemma 3 27B",
+#    "Llama 3.3 70B",
+#    "Qwen 2.5 72B"
+#  ),
+#  max_context = c(
+#    128000,
+#    128000,
+#
+#    128000,
+#    128000,
+#    128000,
+#
+#    256000,
+#    256000,
+#    256000,
+#    128000,
+#
+#    131072,
+#    131072,
+#    131072,
+#    131072
+#  ),
+#  default_num_predict = c(
+#    8192,
+#    8192,
+#
+#    8192,
+#    8192,
+#    8192,
+#
+#    16384,
+#    16384,
+#    16384,
+#    8192,
+#
+#    8192,
+#    8192,
+#    8192,
+#    8192
+#  ),
+#  stringsAsFactors = FALSE
+#)
 
 get_provider_models <- function(provider) {
   llm_model_registry[llm_model_registry$provider == provider, , drop = FALSE]
@@ -530,12 +594,12 @@ call_llm <- function(
     backend = c("deepseek", "kimi", "openai", "ollama"),
     messages,
     deepseek_api_key = "",
-    deepseek_model = "deepseek-v4-pro",
+    deepseek_model = "deepseek-v4-flash",
     kimi_api_key = "",
     kimi_model = "kimi-k3",
     openai_api_key = "",
     openai_model = "gpt-5.6-luna",
-    ollama_model = "qwen3.6:35b",
+    ollama_model = "qwen3.8:27b",
     temperature = 0.2,
     num_predict = NULL,
     num_ctx = NULL,
@@ -585,10 +649,10 @@ call_llm <- function(
 
 get_selected_model_name <- function(
     backend,
-    deepseek_model = "deepseek-v4-pro",
+    deepseek_model = "deepseek-v4-flash",
     kimi_model = "kimi-k3",
     openai_model = "gpt-5.6-luna",
-    ollama_model = "qwen3.6:35b",
+    ollama_model = "qwen3.8:27b",
     ollama_model_mode = "registered",
     ollama_custom_model = ""
 ) {
@@ -625,12 +689,12 @@ get_backend_label <- function(backend) {
 test_llm_connection <- function(
     backend = c("deepseek", "kimi", "openai", "ollama"),
     deepseek_api_key = "",
-    deepseek_model = "deepseek-v4-pro",
+    deepseek_model = "deepseek-v4-flash",
     kimi_api_key = "",
     kimi_model = "kimi-k3",
     openai_api_key = "",
     openai_model = "gpt-5.6-luna",
-    ollama_model = "qwen3.6:35b",
+    ollama_model = "qwen3.8:27b",
     ollama_model_mode = "registered",
     ollama_custom_model = "",
     temperature = 0
@@ -848,7 +912,7 @@ llm_backend_ui <- function(
           get_provider_models("deepseek")$model,
           get_provider_models("deepseek")$label
         ),
-        selected = "deepseek-v4-pro",
+        selected = "deepseek-v4-flash",
         width = "100%"
       )
     ),
@@ -932,7 +996,7 @@ llm_backend_ui <- function(
           inputId = paste0(prefix, "_ollama_custom_model"),
           label = "Custom Ollama Model Name:",
           value = "",
-          placeholder = "Example: qwen2.5:32b, llama3.1:8b, deepseek-r1:70b",
+          placeholder = "Example: qwen3.8:27b, llama3.1:latest, gemma4:31b",
           width = "100%"
         ),
         helpText(
@@ -2983,7 +3047,7 @@ server <- shinyServer(
                             get_provider_models("deepseek")$model,
                             get_provider_models("deepseek")$label
                           ),
-                          selected = "deepseek-v4-pro",
+                          selected = "deepseek-v4-flash",
                           width = "100%"
                         ),
 
@@ -3071,7 +3135,7 @@ server <- shinyServer(
                             "oneclick_ollama_custom_model",
                             label = "Custom Ollama Model Name:",
                             value = "",
-                            placeholder = "Example: qwen2.5:32b, llama3.1:8b, deepseek-r1:70b",
+                            placeholder = "Example: qwen3.8:27b, llama3.1:latest, gemma4:31b",
                             width = "100%"
                           ),
 
