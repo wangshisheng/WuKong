@@ -3439,8 +3439,8 @@ server <- shinyServer(
       "Volcano Plot",
       "PCA",
       "HCA",
-      "GO Enrichment Analysis",
-      "KEGG Enrichment Analysis"
+      "GO Enrichment Analysis"#,
+      #"KEGG Enrichment Analysis"
     )
 
     example_pipeline_modules2 <- c(
@@ -3468,8 +3468,8 @@ server <- shinyServer(
 6. PCA using ONLY the differentially expressed proteins (Up and Down proteins) identified in Step 5. Do NOT use all proteins.
 7. HCA using ONLY the differentially expressed proteins (Up and Down proteins) identified in Step 5.
 8. GO Enrichment Analysis using ONLY the differentially expressed proteins (Up and Down proteins) identified in Step 5.
-9. KEGG Enrichment Analysis using ONLY the differentially expressed proteins (Up and Down proteins) identified in Step 5."
-      )
+"
+      )#9. KEGG Enrichment Analysis using ONLY the differentially expressed proteins (Up and Down proteins) identified in Step 5.
 
       updateTextAreaInput(
         session,
@@ -3491,8 +3491,8 @@ server <- shinyServer(
 6. PCA using ONLY the differentially expressed proteins (Up and Down proteins) identified in Step 5. Do NOT use all proteins.
 7. HCA using ONLY the differentially expressed proteins (Up and Down proteins) identified in Step 5.
 8. Gene Set Enrichment Analysis of GO using the whole proteins identified in Step 4.
-9. Gene Set Enrichment Analysis of KEGG using the whole proteins identified in Step 4."
-      )
+"
+      )#9. Gene Set Enrichment Analysis of KEGG using the whole proteins identified in Step 4.
 
       updateTextAreaInput(
         session,
